@@ -2,6 +2,12 @@
 
 Newest first. Written by the daily review (and by hand) whenever the data changes the engine.
 
+## 2026-11-04 — v0.9.0 (training history)
+- **Tracking:** every training session's exact gain per player (deduped by player + session date, with skill level, age, potential and the staff factor that applied) plus a daily skill snapshot — kept in the browser (`db.history`), up to 300 sessions / 180 days per player.
+- **Changed:** projections use each player's own measured rate (blended with his grade's rate, prior = 5 sessions) and our real training conditions: share of a full session = staff level on the staff skill, 75% otherwise (84% today). Market players are projected with their grade's calibrated rate × the same factor, so buys and our squad are judged on the same training. SESSIONS = 20 full sessions/season (18 league + half-strength cups), multiplied by that factor.
+- **Peak age:** kept at 26 — manual §8: progression −25%/yr from 21, losses possible from 27 (certain after 31). Revisit if tracked data shows growth stalling earlier.
+- **Watch:** first per-player rates after a few league sessions; compare measured vs grade (Training → Progress).
+
 ## 2026-11-04 — v0.8.0 (recruitment)
 - **Data:** live market scan — 748 listings (each line: ready upgrades filtered by our starters' main skills + under-22 prospects, plus the free-agent list), 22 game Values; 120 completed transfers from `ttransfer.asp`.
 - **Found:** a listing's ask is only an auction floor (e.g. ask $75k, Value $774k). Completed transfers went for a median 0.46× the player's Value (0.66 under $250k, 0.50 at $250–750k; wide spread, p90 2×). Caveat: that page is our club's history and "Player Value" is today's value, so older deals skew low.

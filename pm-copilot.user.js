@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PM Copilot — Planetarium Manager assistant
 // @namespace    pm-copilot
-// @version      0.8.0
+// @version      0.9.0
 // @description  Opponent-aware tactics, match prep autopilot, training, transfers, finance and facilities for pmanager.org — learns from every match. Changelog: github.com/Jadax/pm-advisor
 // @author       Tushant Sharma
 // @license      MIT
@@ -23,7 +23,7 @@
 (() => {
   'use strict';
   if (window.top !== window.self) return;
-  const VERSION = '0.8.0';
+  const VERSION = '0.9.0';
   const PAGE = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
 
   /* =========================================================================
@@ -363,6 +363,7 @@
       lastDate: (text.match(/Last Training\s+([\d/]+)/i) || [])[1] || null,
       at: now(),
     };
+    recordGrowth(); // capture every session's gains as soon as the training page is read
     save();
     return `Training: ${rows.length} players`;
   }
@@ -1189,7 +1190,7 @@
     return (db.squad?.players || []).filter(p => !ex.has(p.name)).map(p => {
       const t = matchPlayer(p.name, tr, p.id);
       const d = db.details[p.id] || {};
-      return { ...p, fit: t?.fit, potential: t?.potential, quality: t?.quality, form: d.form, experience: d.experience, professionalism: d.professionalism, penalties: d.penalties };
+      return { ...p, fit: t?.fit, potential: t?.potential, quality: t?.quality, form: d.form, experience: d.experience, professionalism: d.professionalism, penalties: d.penalties, rate: playerRate(p.id, t?.potential).rate };
     });
   }
 
@@ -1556,8 +1557,10 @@
   // Skill points per league-training session at 100%, by potential grade (index into DENOMS).
   // Priors from our own players' training gains; model/fit.js refits them from harvested history.
   const GROWTH = [0.05, 0.082, 0.128, 0.135, 0.167, 0.207, 0.25, 0.319, 0.34, 0.38];
-  const SESSIONS = 18; // effective full-strength trainings per season (league + half-strength cups)
-  const PEAK_AGE = 26; // last season before skill losses start
+  const SESSIONS = 20; // full-strength trainings per season: 18 league rounds + cup/friendly sessions at half strength
+  // Manual §8: progression −25%/year from 21, skill losses possible from 27 (certain after 31) — so 26 is the
+  // last season of real growth, and the age every player is compared at.
+  const PEAK_AGE = 26;
   const HORIZON = 5, DISCOUNT = 0.85;
 
   // Rating bonus for a talent, given the plan we actually play (effects aren't published — kept small).
@@ -1576,10 +1579,12 @@
     return hit ? (hit[1] ? 0.25 : 0.05) : 0;
   }
 
-  // Season-by-season skills for one player, training spent where his position gains most.
+  // Season-by-season skills for one player, training spent where his position gains most. Uses his own
+  // measured rate when we have one (our players), else his grade's rate — and, either way, the share of a
+  // full session our training actually delivers (staff level, individual vs staff skill).
   function projectSkills(p, line, seasons = HORIZON) {
     const g = denomIdx(p.potential || '');
-    const base = GROWTH[g >= 0 ? g : 4];
+    const base = (p.rate ?? GROWTH[g >= 0 ? g : 4]) * (p.trainFactor ?? trainingFactor());
     const sk = { ...p.sk };
     const out = [{ age: p.age, sk: { ...sk } }];
     const w = ROLE_W[line];
@@ -2336,21 +2341,35 @@
   }
 
   // Growth per potential grade from our players' exact per-session training gains.
+  // Every training session's exact gain per player (deduped by player|session date) feeds three things:
+  // the squad's training history, each player's own growth rate, and the growth table per potential grade.
   function recordGrowth() {
     const t = db.training;
-    if (!t?.rows?.length || !t.lastDate) return;
+    // needs the squad for skill levels and ages; the session stays unseen and is recorded on the next read
+    if (!t?.rows?.length || !t.lastDate || !db.squad?.players?.length) return;
     const g = (db.growth = db.growth || { samples: {}, seen: {} });
+    const hist = (db.history = db.history || {});
     const staff = (t.staff || []).map(s => ({ skill: norm(s.skill), f: Math.min(1, 0.75 + 0.05 * (s.q || 0)) }));
+    const day = new Date().toISOString().slice(0, 10);
     for (const r of t.rows) {
+      const sq = (db.squad?.players || []).find(p => p.id === r.id);
+      const h = (hist[r.id] = hist[r.id] || { name: r.name, sessions: [], snaps: [] });
+      // one snapshot a day: skills, age and grades, so improvement can be shown over time
+      if (sq && h.snaps[h.snaps.length - 1]?.date !== day) {
+        h.snaps.push({ date: day, age: sq.age, sk: { ...sq.sk }, potential: r.potential, quality: r.quality, fit: r.fit });
+        if (h.snaps.length > 180) h.snaps.shift();
+      }
       const key = `${r.id}|${t.lastDate}`, gi = denomIdx(r.potential || '');
       const gain = sum((r.last || []).map(l => l.delta || 0));
-      if (g.seen[key] || gi < 0 || !gain) continue;
+      if (g.seen[key] || !gain) continue;
       g.seen[key] = 1;
       const trained = norm(r.last[0].skill);
-      const sq = (db.squad?.players || []).find(p => p.id === r.id);
       const code = Object.keys(SKILL_NAME).find(k => norm(SKILL_NAME[k]) === trained);
-      if (code && (sq?.sk?.[code] ?? 0) >= 18) continue; // near the cap gains slow — says little about the rate
+      const level = code ? (sq?.sk?.[code] ?? 0) : 0;
       const factor = staff.find(s => s.skill === trained)?.f || 0.75;
+      h.sessions.push({ d: t.lastDate, skill: r.last.map(l => l.skill).join('+'), gain: +gain.toFixed(4), full: +(gain / factor).toFixed(4), factor, level, age: sq?.age, potential: r.potential });
+      if (h.sessions.length > 300) h.sessions.shift();
+      if (gi < 0 || level >= 18) continue; // near the cap gains slow — says little about the rate
       (g.samples[gi] = g.samples[gi] || []).push(+(gain / factor).toFixed(4));
       if (g.samples[gi].length > 200) g.samples[gi].shift();
     }
@@ -2358,6 +2377,20 @@
     db.model = { ...db.model, growth: fitted };
     applyModel(db.model);
     save();
+  }
+  // A player's own growth per full-strength session: his measured sessions (below 18) blended with his grade's rate.
+  function playerRate(id, potential) {
+    const gi = denomIdx(potential || '');
+    const prior = GROWTH[gi >= 0 ? gi : 4];
+    const s = (db.history?.[id]?.sessions || []).filter(x => x.level < 18);
+    return { rate: (prior * GROWTH_PRIOR_WEIGHT + sum(s.map(x => x.full))) / (GROWTH_PRIOR_WEIGHT + s.length), n: s.length, prior };
+  }
+  // How much of a full session our players actually get: staff level on the staff skill, 75% otherwise.
+  function trainingFactor() {
+    const t = db.training;
+    if (!t?.rows?.length) return 0.9;
+    const staff = (t.staff || []).map(s => ({ skill: norm(s.skill), f: Math.min(1, 0.75 + 0.05 * (s.q || 0)) }));
+    return avg(t.rows.map(r => staff.find(s => s.skill === norm(r.training))?.f || 0.75));
   }
 
   // Match database: the plan + forecast before each match, the result after — graded against the pundits.
@@ -2744,6 +2777,20 @@ input.txt{flex:1;height:26px;border:1px solid var(--line);background:var(--bg);c
       <div class="xs mut" style="margin-top:6px">No individual order = no training; individual ≠ staff → 75%. Cup/friendly sessions are half strength. B-team players over 22 don’t improve.</div>`);
     h += sec('ind', 'Individual', `<table><tr><th>Player</th><th>Now</th><th>Best</th></tr>${t.rows.map(r => `<tr><td>${esc(r.p.name)}<div class="xs mut">${esc(r.why)}</div>${r.warn.map(w => `<div class="xs" style="color:var(--warn)">${esc(w)}</div>`).join('')}</td><td class="xs">${esc(r.cur)}${r.t?.last?.length ? `<div class="mut">${r.t.last.map(l => `+${l.delta}`).join(' ')}</div>` : ''}</td><td>${chip(r.rec, r.mismatch ? 'w' : 'g')}</td></tr>`).join('')}</table>`,
       { right: n ? `<button class="btn p" data-act="train">Apply ${n}</button>` : chip('all set', 'g') });
+    // tracked history: measured growth vs what the grade predicts, and the projection it implies at 26
+    const plan = computePlan();
+    const pool = plan.pool || squadPool();
+    const tf = trainingFactor();
+    const prog = pool.map(p => {
+      const hst = db.history?.[p.id] || { sessions: [], snaps: [] };
+      const r = playerRate(p.id, p.potential);
+      const v = valuePath(p, { line: p.line || 'M', lane: (p.sides || 'C')[0], code: '' }, plan);
+      return { p, hst, r, v, gained: sum(hst.sessions.map(s => s.gain)), since: hst.snaps[0]?.date };
+    }).sort((a, b) => (b.v.at26 - b.v.now) - (a.v.at26 - a.v.now));
+    const vs = x => (x.r.n >= 3 ? (x.r.rate > x.r.prior * 1.15 ? 'var(--good)' : x.r.rate < x.r.prior * 0.85 ? 'var(--bad)' : 'inherit') : 'var(--mut)');
+    h += sec('progress', 'Progress', `<div class="xs mut" style="margin-bottom:6px">Your training delivers <b>${pct(tf)}</b> of a full session on average (staff level on the staff skill, 75% for anything else). Projections use each player’s own measured rate (blended with his grade’s until he has a few sessions), so buys and your squad are judged on the same training.</div>
+      <table><tr><th>Player</th><th class="n" title="Sessions measured">Ses.</th><th class="n" title="Measured gain per full session (grade average)">/ses.</th><th class="n" title="Skill points gained since tracking started">Gained</th><th class="n">Now→26</th></tr>${prog.map(x => `<tr><td>${esc(x.p.name)}<div class="xs mut">${x.p.age} · ${esc(x.p.potential || '?')}${x.p.age >= PEAK_AGE ? ' · past growth age' : ` · ${PEAK_AGE - x.p.age} season${PEAK_AGE - x.p.age === 1 ? '' : 's'} to 26`}</div></td><td class="n">${x.r.n}</td><td class="n"><span style="color:${vs(x)}">${x.r.rate.toFixed(3)}</span><div class="xs mut">${x.r.prior.toFixed(3)}</div></td><td class="n">${x.gained ? '+' + x.gained.toFixed(2) : '—'}</td><td class="n">${f1(x.v.now)}<div class="xs" style="color:${x.v.at26 - x.v.now > 0.4 ? 'var(--good)' : 'var(--mut)'}">→ ${f1(x.v.at26)}</div></td></tr>`).join('')}</table>
+      <div class="xs mut" style="margin-top:6px">Tracking since ${esc(prog.find(x => x.since)?.since || 'today')}. Green/red = clearly ahead/behind his grade (3+ sessions). Growth peaks at 26 (−25%/yr from 21, losses from 27).</div>`, { open: true });
     return h;
   }
 
