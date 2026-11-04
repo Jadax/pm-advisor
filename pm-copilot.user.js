@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PM Copilot — Planetarium Manager assistant
 // @namespace    pm-copilot
-// @version      0.11.1
+// @version      0.11.2
 // @description  Opponent-aware tactics, match prep autopilot, training, transfers, finance and facilities for pmanager.org — learns from every match. Changelog: github.com/Jadax/pm-advisor
 // @author       Tushant Sharma
 // @license      MIT
@@ -23,7 +23,7 @@
 (() => {
   'use strict';
   if (window.top !== window.self) return;
-  const VERSION = '0.11.1';
+  const VERSION = '0.11.2';
   const PAGE = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
 
   /* =========================================================================
@@ -1741,12 +1741,18 @@
   const SEARCH_BASE = { nome: '', pos: '0', lado: '-1', idd_op: '<', idd: 'Any', temp_op: '<', temp: 'Any', expe_op: '>=', expe: 'Any', con_op: '<', con: 'Any', pro_op: '>', pro: 'Any', vel_op: '>', vel: 'Any', forma_op: '>', forma: 'Any', cab_op: '>', cab: 'Any', ord_op: '<=', ord: 'Any', cul_op: '>', cul: 'Any', pre_op: '<=', pre: 'Any', forca_op: '>', forca: 'Any', lesionado: 'No', prog_op: '>', prog: 'Any', tack_op: '>', tack: 'Any', internacional: 'Any', passe_op: '>', passe: 'Any', pais: '-1', rem_op: '>', rem: 'Any', tec_op: '>', tec: 'Any', jmaos_op: '>', jmaos: 'Any', saidas_op: '>', saidas: 'Any', reflexos_op: '>', reflexos: 'Any', agilidade_op: '>', agilidade: 'Any', qual_op: '>', qual: 'Any', talento: '', nacional: '-1', B1: 'Pesquisar', field: '17', pid: '1', sort: '0', pv: '1' };
   const searchUrl = o => '/procurar.asp?action=proc_jog&' + new URLSearchParams({ ...SEARCH_BASE, ...o }).toString();
   const AUCTION_RATIO = 0.5; // sale fee / player Value, from completed transfers (ttransfer.asp)
+  // Fees spread widely around that (median 0.46, 90th percentile ~2×): log-normal with this log-sd.
+  const AUCTION_SPREAD = 1.15;
+  const normCdf = z => { const t = 1 / (1 + 0.2316419 * Math.abs(z)); const d = 0.3989423 * Math.exp(-z * z / 2) * t * (0.3193815 + t * (-0.3565638 + t * (1.781478 + t * (-1.821256 + t * 1.330274)))); return z > 0 ? 1 - d : d; };
+  // chance an auction for a player of this Value ends at or below what we're willing to bid
+  const winChance = (bid, worth) => (worth > 0 ? normCdf(Math.log(bid / (AUCTION_RATIO * worth)) / AUCTION_SPREAD) : 1);
   // Share of today's price a player still fetches when sold at a given age (growth to 26, decline from 27,
   // retirement from 30). A prior until the market history says otherwise.
   const RESALE_YEARS = 3;
   const resaleShare = age => (age <= 24 ? 1 : age <= 26 ? 0.85 : age <= 28 ? 0.6 : age <= 30 ? 0.35 : age <= 32 ? 0.15 : 0);
   const SCAN_POS = { GK: 'GR', D: 'D', M: 'M', F: 'A' };
   const SCAN_PAGES = 3; // 30 per page
+  const FREE_PAGES = 3;
   // Search-form skill filters and sort fields for each line's two main skills; free-list sort actions.
   const MAIN_FILTER = { GK: [['jmaos', 'HAN', 3], ['saidas', 'CRO', 4]], D: [['tack', 'TCK', 7], ['cab', 'HEA', 8]], M: [['passe', 'PAS', 9], ['cul', 'POS', 10]], F: [['rem', 'FIN', 11], ['tec', 'TEC', 12]] };
   const FREE_SORT = { GK: 'maos', D: 'tackling', M: 'passe', F: 'remate' };
@@ -1758,15 +1764,16 @@
     const pre = String(PRICE_STEPS.find(p => p >= cap) ?? 'Any');
     return Object.entries(SCAN_POS).flatMap(([line, pos]) => {
       const starters = (plan?.best?.xi || []).filter(x => x.slot.line === line).map(x => x.p);
-      const filt = {};
-      for (const [param, k] of MAIN_FILTER[line]) {
-        const low = starters.length ? Math.min(...starters.map(p => p.sk?.[k] ?? 0)) : 14;
-        filt[param + '_op'] = '>';
-        filt[param] = String(clamp(Math.floor(low) - 3, 10, 19));
-      }
+      const low = k => (starters.length ? Math.min(...starters.map(p => p.sk?.[k] ?? 0)) : 14);
+      const [[p1, k1, field], [p2, k2]] = MAIN_FILTER[line];
+      const base = { pos, pre_op: '<=', pre, idd_op: '<', idd: String(MAX_BUY_AGE_ANY + 1), field: String(field), sort: '1' };
+      const floor = k => String(clamp(Math.floor(low(k)) - 3, 10, 19));
       return [
-        { line, kind: 'ready', q: { pos, pre_op: '<=', pre, field: String(MAIN_FILTER[line][0][2]), sort: '1', ...filt } },
-        { line, kind: 'prospect', q: { pos, pre_op: '<=', pre, idd_op: '<', idd: '22', prog_op: '>', prog: '6' } },
+        // the best available — their winning bids (≈ half their Value) are often far above a low ask
+        { line, kind: 'ready', pages: 2, q: { ...base, [p1 + '_op']: '>', [p1]: floor(k1), [p2 + '_op']: '>', [p2]: floor(k2) } },
+        // a few points above our weakest starter: real upgrades a smaller budget can win
+        { line, kind: 'band', pages: 3, q: { ...base, [p1 + '_op']: '<=', [p1]: String(clamp(Math.floor(low(k1)) + 4, 10, 19)), [p2 + '_op']: '>', [p2]: floor(k2) } },
+        { line, kind: 'prospect', pages: 3, q: { pos, pre_op: '<=', pre, idd_op: '<', idd: '22', prog_op: '>', prog: '6' } },
       ];
     });
   }
@@ -1793,7 +1800,7 @@
       return db.market.rows.length;
     };
     for (const s of scanQueries(computePlan())) {
-      for (let page = 1; page <= SCAN_PAGES; page++) {
+      for (let page = 1; page <= (s.pages || SCAN_PAGES); page++) {
         progress(`Market: ${s.line} ${s.kind} p${page}…`);
         const got = await take(searchUrl({ ...s.q, pid: String(page) }), 'scan');
         n += got;
@@ -1804,8 +1811,13 @@
     }
     for (const [line, act] of Object.entries(FREE_SORT)) {
       progress(`Free players: ${line}…`);
-      n += await take(`/lista_livres.asp?action=${act}&gid=1&sort=0&pv=1`, 'free');
-      await sleep(150);
+      // best-first lists start with veterans we won't sign, so read a few pages
+      for (let gid = 1; gid <= FREE_PAGES; gid++) {
+        const got = await take(`/lista_livres.asp?action=${act}&gid=${gid}&sort=0&pv=1`, 'free');
+        n += got;
+        await sleep(150);
+        if (!got) break;
+      }
     }
     db.market = keepPage;
     db.scan.at = now();
@@ -1822,18 +1834,20 @@
 
   // What a player of this level costs: log(price) ~ rating now + growth to 26 + youth (ridge least squares).
   // Learns from the game's Value once we know 12+ (asks are only auction floors), else from asks.
+  // price features: rating now, growth to 26, youth premium, and the slide from 27 (older players fetch far less)
+  const feats = (r, v) => [1, v.now, v.at26 - v.now, Math.max(0, 24 - r.age), Math.max(0, r.age - 27)];
   function fairPriceModel(rows) {
     const vals = db.playerValues || {};
-    const byValue = rows.filter(r => vals[r.id]?.value > 0).length >= 12;
+    const byValue = rows.filter(r => vals[r.id]?.value > 0).length >= 25; // fewer, and a few stars skew it
     const target = r => (byValue ? vals[r.id]?.value : r.price);
     const data = rows.filter(r => target(r) > 0 && r.age && r.line).map(r => {
       const v = valuePath(r, { line: r.line, lane: (r.sides || 'C')[0], code: '' }, null);
-      return { x: [1, v.now, v.at26 - v.now, Math.max(0, 24 - r.age)], y: Math.log(target(r)) };
+      return { x: feats(r, v), y: Math.log(target(r)) };
     });
     if (data.length < 12) return null;
-    const k = 4, A = Array.from({ length: k }, (_, i) => Array.from({ length: k }, (_, j) => (i === j && i ? 1 : 0))), b = new Array(k).fill(0);
+    const k = 5, A = Array.from({ length: k }, (_, i) => Array.from({ length: k }, (_, j) => (i === j && i ? 1 : 0))), b = new Array(k).fill(0);
     for (const d of data) for (let i = 0; i < k; i++) { b[i] += d.x[i] * d.y; for (let j = 0; j < k; j++) A[i][j] += d.x[i] * d.x[j]; }
-    // Gaussian elimination on the 4×4 normal equations
+    // Gaussian elimination on the normal equations
     for (let i = 0; i < k; i++) {
       let p = i; for (let r = i + 1; r < k; r++) if (Math.abs(A[r][i]) > Math.abs(A[p][i])) p = r;
       [A[i], A[p]] = [A[p], A[i]]; [b[i], b[p]] = [b[p], b[i]];
@@ -1841,7 +1855,7 @@
     }
     const w = new Array(k).fill(0);
     for (let i = k - 1; i >= 0; i--) w[i] = (b[i] - sum(A[i].slice(i + 1).map((a, j) => a * w[i + 1 + j]))) / A[i][i];
-    return { n: data.length, byValue, price: r => { const v = valuePath(r, { line: r.line, lane: (r.sides || 'C')[0], code: '' }, null); return Math.exp(w[0] + w[1] * v.now + w[2] * (v.at26 - v.now) + w[3] * Math.max(0, 24 - r.age)); } };
+    return { n: data.length, byValue, price: r => { const v = valuePath(r, { line: r.line, lane: (r.sides || 'C')[0], code: '' }, null); return Math.exp(sum(feats(r, v).map((x, i) => x * w[i]))); } };
   }
 
   // How much each XI slot matters in this match model: expected points gained from +1 rating there.
@@ -1911,12 +1925,15 @@
     const value = pick(within(caps.max).filter(e => e.d5 > 1.5), e => e.roi * (e.cheap ? Math.min(1.5, e.cheap) : 1), 3);
     // what more money would buy: biggest upgrades above the cap, under 30, within 80% of funds
     const stretch = pick(uniq.filter(e => e.expPrice > caps.max && e.expPrice <= caps.funds * 0.8 && e.c.age <= maxAge), e => e.w, 2);
+    // auctions that may still end within the cap: ask fits, expected fee doesn't — bid the cap and see
+    const bids = pick(uniq.filter(e => !e.c.free && (e.c.price || 0) <= caps.max && e.expPrice > caps.max && e.c.age <= maxAge)
+      .map(e => Object.assign(e, { chance: winChance(caps.max, e.value || (e.fair && fair?.byValue ? e.fair : 0)) })).filter(e => e.chance >= 0.15), e => e.w * e.chance, 3);
     const slots = ours.map(o => {
       const forSlot = evals.filter(e => e.slot === o.x.slot && e.d5 > 0.5 && e.wageOk && e.c.age <= MAX_BUY_AGE_ANY && e.expPrice <= caps.max);
       const one = (key, ok = () => true) => forSlot.filter(ok).sort((a, b) => key(b) - key(a))[0] || null;
       return { slot: o.x.slot, starter: o.x.p, ov: o.v, imp: impact.get(o.x.slot) || 1, best: one(e => e.w, e => e.c.age <= maxAge), value: one(e => e.roi) };
     }).sort((a, b) => b.imp - a.imp);
-    return { caps, fair, best, value, stretch, slots, maxAge, minNational: db.academy?.minNational, n: cands.length, scannedAt: db.scan?.at };
+    return { caps, fair, best, value, stretch, bids, slots, maxAge, all: uniq, minNational: db.academy?.minNational, n: cands.length, scannedAt: db.scan?.at };
   }
 
   // The game's own Value for the shortlist (player page), to show how far under value a price is.
@@ -1936,11 +1953,14 @@
   }
   async function runScan(progress = () => {}) {
     const n = await scanMarket(progress);
-    // a fetched Value can push a player over budget, so refill the shortlist once and value the newcomers
-    for (let pass = 0; pass < 2; pass++) {
+    // a fetched Value can push a player over budget, so refill the shortlist and value the newcomers. Also value
+    // the biggest upgrades whose ask fits the cap: if only shortlisted players were valued, the price model would
+    // learn from expensive players alone and price every cheap listing out of reach.
+    for (let pass = 0; pass < 3; pass++) {
       const board = recruitBoard(computePlan());
       if (!board) break;
-      const short = [...new Map([...board.best, ...board.value, ...board.stretch, ...board.slots.flatMap(s => [s.best, s.value])].filter(Boolean).map(e => [e.c.id, e])).values()].filter(e => !e.c.free);
+      const affordable = board.all.filter(e => (e.c.price || 0) <= board.caps.max).sort((a, b) => b.w - a.w).slice(0, 15);
+      const short = [...new Map([...board.best, ...board.value, ...board.stretch, ...board.slots.flatMap(s => [s.best, s.value]), ...affordable].filter(Boolean).map(e => [e.c.id, e])).values()].filter(e => !e.c.free);
       await fetchValues(short, progress);
     }
     logAction('market', `Scanned ${n} listings · ${Object.keys(db.scan?.rows || {}).length} live`);
@@ -2987,9 +3007,10 @@ input.txt{flex:1;height:26px;border:1px solid var(--line);background:var(--bg);c
       h += sec('recruit', 'Recruitment', `<div class="row sp wr"><span class="sm">Funds <b>${money(B.caps.funds)}</b> · up to <b>${money(B.caps.max)}</b> per player</span><span class="seg">${[0.2, 0.35, 0.5].map(p => `<button data-buypct="${p}" class="${Math.abs(B.caps.pct - p) < 0.01 ? 'on' : ''}">${Math.round(p * 100)}%</button>`).join('')}</span></div>
         <div class="row" style="margin-top:6px"><button class="btn p" data-act="scan" ${busy ? 'disabled' : ''}>${B.scannedAt ? 'Rescan market' : 'Scan market'}</button><span class="xs mut">${B.n} live listings${B.scannedAt ? ' · ' + ago(B.scannedAt) : ''}</span></div>
         <div class="xs mut" style="margin-top:6px">Every position and the free-agent list, each player rated in every slot of his line against your starter over 5 seasons, weighted by how much that slot decides matches. Cost = expected winning bid (≈ half his Value, never below the ask) + a season of wages.</div>`);
-      h += sec('rbest', 'Best buys', `<div class="row sp" style="margin-bottom:6px"><span class="xs mut">Long-term upgrades, priority positions first, one per position.</span><span class="seg">${[[25, '≤25'], [29, '≤29'], [99, 'Any age']].map(([a, l]) => `<button data-maxage="${a}" class="${B.maxAge === a ? 'on' : ''}">${l}</button>`).join('')}</span></div>` + tbl(B.best), { right: `≤ ${money(B.caps.max)}` });
+      h += sec('rbest', 'Best buys', `<div class="row sp" style="margin-bottom:6px"><span class="xs mut">Long-term upgrades, priority positions first, one per position.</span><span class="seg">${[[25, '≤25'], [29, '≤29'], [99, 'Any age']].map(([a, l]) => `<button data-maxage="${a}" class="${B.maxAge === a ? 'on' : ''}">${l}</button>`).join('')}</span></div>` + tbl(B.best) + (!B.best.length && B.stretch.length ? `<div class="xs mut" style="margin-top:6px">Real upgrades start above your cap (Worth saving for, from ≈${money(Math.min(...B.stretch.map(e => e.expPrice)))}) — a higher share of funds would cover them.</div>` : ''), { right: `≤ ${money(B.caps.max)}` });
       if (B.minNational && !/no limit/i.test(B.minNational)) h += `<div class="sec"><div class="sm" style="color:var(--warn)">Your federation now requires national players: ${esc(B.minNational)}. Check nationalities before buying.</div></div>`;
       h += sec('rvalue', 'Best value', tbl(B.value) + '<div class="xs mut" style="margin-top:6px">Most upgrade per $1M of <b>net</b> cost — the fee minus what he still sells for in 3 seasons (young players keep their value, 30+ lose it), plus a season of wages. Free agents and short-term fixes (30–32) included; nobody likely to retire before next season — this season only counts for the rounds left.</div>', { right: 'return per $' });
+      if (B.bids?.length) h += sec('rbids', 'Bid up to your cap', tbl(B.bids) + `<div class="xs mut" style="margin-top:6px">Their ask fits your cap but auctions usually end higher (≈ half the Value). Bid at most ${money(B.caps.max)}: ${B.bids.map(e => `${esc(surname(e.c.name))} ~${Math.round(e.chance * 100)}%`).join(' · ')} chance to win at that price.</div>`, { right: 'chance at cap' });
       if (B.stretch.length) h += sec('rstretch', 'Worth saving for', tbl(B.stretch) + '<div class="xs mut" style="margin-top:6px">Bigger long-term upgrades above your cap (under 30).</div>', { right: `> ${money(B.caps.max)}`, open: false });
       h += sec('rslots', 'By position', `<table><tr><th>Slot</th><th>Starter</th><th>Best</th><th>Value</th></tr>${B.slots.map(s => `<tr><td>${chip(s.slot.code)}<div class="xs mut" title="How much this slot decides matches (1 = average)">×${s.imp.toFixed(1)}</div></td><td class="xs">${esc(surname(s.starter.name))}<div class="mut">${f1(s.ov.now)} → ${f1(s.ov.at26)}</div></td>${[s.best, s.value].map(e => `<td class="xs">${e ? `<a href="/ver_jogador.asp?jog_id=${esc(e.c.id)}" style="color:inherit;font-weight:600">${esc(surname(e.c.name))}</a> <span style="color:var(--good)">${sg(e.d5)}</span><div class="mut">${e.c.age}y · ≈${money(e.expPrice)}</div>` : '<span class="mut">—</span>'}</td>`).join('')}</tr>`).join('')}</table><div class="xs mut" style="margin-top:6px">Ordered by how much each position decides matches in the current model (×1 = average).</div>`, { open: false });
     }
