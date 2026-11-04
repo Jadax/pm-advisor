@@ -2,6 +2,12 @@
 
 Newest first. Written by the daily review (and by hand) whenever the data changes the engine.
 
+## 2026-11-04 — v0.8.0 (recruitment)
+- **Data:** live market scan — 748 listings (each line: ready upgrades filtered by our starters' main skills + under-22 prospects, plus the free-agent list), 22 game Values; 120 completed transfers from `ttransfer.asp`.
+- **Found:** a listing's ask is only an auction floor (e.g. ask $75k, Value $774k). Completed transfers went for a median 0.46× the player's Value (0.66 under $250k, 0.50 at $250–750k; wide spread, p90 2×). Caveat: that page is our club's history and "Player Value" is today's value, so older deals skew low.
+- **Changed:** expected cost = max(ask, 0.5 × Value) + a season of wages (free agents: 12-week signing fee); price model learns from game Values once 12+ are known. Retirement from 30 weights future seasons (0.85 → 0.6 → 0 from 35). Slot importance measured from the match model (+1 rating → expected points): LB ×2.2, LF ×2.0, GK ×1.9, RF ×1.6, CF ×1.3, midfield/CDs ×0.2–0.5 vs this opponent. Scout tab: Best buys (3) + Best value (3), one per position; Worth saving for (2); By position ordered by importance. Autopilot rescans every 12 h.
+- **Watch:** learn the auction ratio from real outcomes (record Value at scan time, read the winning fee later).
+
 ## 2026-11-03 — no change (v0.7.0 stays)
 - **Data:** no fresh harvest (browser pane closed); identical to 02/11 — 99 reports, 2 decisions, 1 graded match (model Brier 0.001 vs pundits 0.639).
 - **Refit:** unchanged (robust BASE 6, K_BEAT 1.5, K_GK 1, K_MID 8; −253.6 vs −455.2 constant-rate).

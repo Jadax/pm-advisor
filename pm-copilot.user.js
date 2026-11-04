@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PM Copilot — Planetarium Manager assistant
 // @namespace    pm-copilot
-// @version      0.7.0
+// @version      0.8.0
 // @description  Opponent-aware tactics, match prep autopilot, training, transfers, finance and facilities for pmanager.org — learns from every match. Changelog: github.com/Jadax/pm-advisor
 // @author       Tushant Sharma
 // @license      MIT
@@ -23,7 +23,7 @@
 (() => {
   'use strict';
   if (window.top !== window.self) return;
-  const VERSION = '0.7.0';
+  const VERSION = '0.8.0';
   const PAGE = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
 
   /* =========================================================================
@@ -791,6 +791,7 @@
     [/ver_jogador\.asp/i, parsePlayerPage],
     [/eqtecnica\.asp/i, parseStaffPage],
     [/procurar\.asp/i, parseMarketPage],
+    [/lista_livres\.asp/i, parseMarketPage],
   ];
   function ingest(doc, url, ctx) {
     const u = new URL(url, location.origin);
@@ -1327,7 +1328,7 @@
     const captain = starters.slice().sort((a, b) => profScore(b) - profScore(a) || b.score - a.score)[0];
     const penScore = p => (p.penalties ? denomIdx(p.penalties) * 5 : 0) + 0.5 * ((p.sk?.FIN || 0) + (p.sk?.TEC || 0));
     const pens = starters.filter(x => x.slot.line !== 'GK').sort((a, b) => penScore(b.p) - penScore(a.p))[0];
-    const plan = { best, alts, opp, attitudes, pref, prefs, current, captain, pens, home, pool, cal, total: results.length };
+    const plan = { best, alts, opp, oppSide, attitudes, pref, prefs, current, captain, pens, home, pool, cal, total: results.length };
     planCache = { v: key, plan };
     return plan;
   }
@@ -1618,6 +1619,10 @@
     return { now: ratings[0], at26, ratings: ratings.slice(0, HORIZON + 1) };
   }
   const discounted = rs => sum(rs.map((r, i) => r * DISCOUNT ** i));
+  // Players decide to retire from 30 (manual §7) — a future season only counts if he's still likely playing.
+  const careerWeight = age => (age < 30 ? 1 : age < 32 ? 0.85 : age < 35 ? 0.6 : 0);
+  // 5-season gain of a candidate over the starter he'd replace; this season always counts.
+  const seasonGain = (cand, starter, age) => sum(cand.ratings.map((r, i) => (r - starter.ratings[i]) * DISCOUNT ** i * (i ? careerWeight((age || 22) + i) : 1)));
 
   // Rank candidates (transfer list, search results) against the starter each would replace.
   function rankCandidates(cands, plan) {
@@ -1633,7 +1638,7 @@
       for (const o of ours) {
         if (o.x.slot.line === 'GK' && c.line !== 'GK') continue;
         const v = valuePath(c, o.x.slot, plan);
-        const d5 = discounted(v.ratings) - discounted(o.v.ratings);
+        const d5 = seasonGain(v, o.v, c.age);
         if (!best || d5 > best.d5) best = { slot: o.x.slot, vs: o.x.p, v, ov: o.v, d5, dNow: v.now - o.v.now, d26: v.at26 - o.v.at26 };
       }
       const price = c.price || 0;
@@ -1661,11 +1666,13 @@
       return {
         id: playerId(link), name: clean(link.getAttribute('title') || link.textContent), line: pos.line, sides: pos.sides || '',
         age: num(r.querySelector('.tlf-c-age')?.textContent), sk, quality: grades[0] || null, potential: grades[1] || null,
-        talent: tal ? tal.getAttribute('title') : null, wage: money[0] ?? null, price: ask ? num(ask.textContent) || 0 : money[1] || 0,
+        talent: tal ? tal.getAttribute('title') : null, wage: money[0] ?? null, free: /lista_livres/i.test(u.pathname),
+        price: /lista_livres/i.test(u.pathname) ? 0 : ask ? num(ask.textContent) || 0 : money[1] || 0,
         deadline: clean(r.querySelector('.tlf-pd__d')?.textContent) || null,
       };
     });
     db.market = { rows: list, url: u.pathname + u.search, at: now() };
+    mergeListings(list, 'page');
     save();
     return `Market: ${list.length} players`;
   }
@@ -1689,6 +1696,209 @@
       b.style.cssText = `display:inline-block;margin-left:6px;padding:0 6px;border-radius:9px;font:700 10px/16px system-ui,sans-serif;color:#fff;background:${col};vertical-align:middle;cursor:help`;
       cell.querySelector('a')?.after(b);
     }
+  }
+
+  /* ---------- Recruitment: scan the whole market, price it, pick best / budget / steal per slot ---------- */
+  // Same parameter set the game's own search form sends (procurar.asp?action=proc_jog, GET-able).
+  const SEARCH_BASE = { nome: '', pos: '0', lado: '-1', idd_op: '<', idd: 'Any', temp_op: '<', temp: 'Any', expe_op: '>=', expe: 'Any', con_op: '<', con: 'Any', pro_op: '>', pro: 'Any', vel_op: '>', vel: 'Any', forma_op: '>', forma: 'Any', cab_op: '>', cab: 'Any', ord_op: '<=', ord: 'Any', cul_op: '>', cul: 'Any', pre_op: '<=', pre: 'Any', forca_op: '>', forca: 'Any', lesionado: 'No', prog_op: '>', prog: 'Any', tack_op: '>', tack: 'Any', internacional: 'Any', passe_op: '>', passe: 'Any', pais: '-1', rem_op: '>', rem: 'Any', tec_op: '>', tec: 'Any', jmaos_op: '>', jmaos: 'Any', saidas_op: '>', saidas: 'Any', reflexos_op: '>', reflexos: 'Any', agilidade_op: '>', agilidade: 'Any', qual_op: '>', qual: 'Any', talento: '', nacional: '-1', B1: 'Pesquisar', field: '17', pid: '1', sort: '0', pv: '1' };
+  const searchUrl = o => '/procurar.asp?action=proc_jog&' + new URLSearchParams({ ...SEARCH_BASE, ...o }).toString();
+  const AUCTION_RATIO = 0.5; // sale fee / player Value, from completed transfers (ttransfer.asp)
+  const SCAN_POS = { GK: 'GR', D: 'D', M: 'M', F: 'A' };
+  const SCAN_PAGES = 3; // 30 per page
+  // Search-form skill filters and sort fields for each line's two main skills; free-list sort actions.
+  const MAIN_FILTER = { GK: [['jmaos', 'HAN', 3], ['saidas', 'CRO', 4]], D: [['tack', 'TCK', 7], ['cab', 'HEA', 8]], M: [['passe', 'PAS', 9], ['cul', 'POS', 10]], F: [['rem', 'FIN', 11], ['tec', 'TEC', 12]] };
+  const FREE_SORT = { GK: 'maos', D: 'tackling', M: 'passe', F: 'remate' };
+  const PRICE_STEPS = [0, 10e3, 20e3, 30e3, 40e3, 50e3, 60e3, 70e3, 80e3, 90e3, 100e3, 125e3, 150e3, 175e3, 200e3, 250e3, 300e3, 350e3, 400e3, 450e3, 500e3, 600e3, 700e3, 800e3, 900e3, 1e6, 1.25e6, 1.5e6, 1.75e6, 2e6, 2.25e6, 2.5e6, 2.75e6, 3e6, 3.5e6, 4e6, 4.5e6, 5e6, 6e6, 7e6, 8e6, 9e6, 10e6, 20e6];
+  // Per line: ready upgrades (main skills near our starters', within the price cap, best first) and
+  // prospects (under 22, Very Good+ potential). Thresholds come from our weakest starter in that line.
+  function scanQueries(plan) {
+    const cap = buyCaps().max;
+    const pre = String(PRICE_STEPS.find(p => p >= cap) ?? 'Any');
+    return Object.entries(SCAN_POS).flatMap(([line, pos]) => {
+      const starters = (plan?.best?.xi || []).filter(x => x.slot.line === line).map(x => x.p);
+      const filt = {};
+      for (const [param, k] of MAIN_FILTER[line]) {
+        const low = starters.length ? Math.min(...starters.map(p => p.sk?.[k] ?? 0)) : 14;
+        filt[param + '_op'] = '>';
+        filt[param] = String(clamp(Math.floor(low) - 3, 10, 19));
+      }
+      return [
+        { line, kind: 'ready', q: { pos, pre_op: '<=', pre, field: String(MAIN_FILTER[line][0][2]), sort: '1', ...filt } },
+        { line, kind: 'prospect', q: { pos, pre_op: '<=', pre, idd_op: '<', idd: '22', prog_op: '>', prog: '6' } },
+      ];
+    });
+  }
+
+  // "31/10/26 06:04" → ms; listings past their deadline are gone.
+  const deadlineMs = s => { const m = String(s || '').match(/(\d{1,2})\/(\d{1,2})\/(\d{2,4})\s+(\d{1,2}):(\d{2})/); return m ? new Date(+m[3] < 100 ? 2000 + +m[3] : +m[3], m[2] - 1, +m[1], +m[4], +m[5]).getTime() : null; };
+  function mergeListings(rows, source) {
+    const pool = (db.scan = db.scan || { rows: {}, at: null }).rows;
+    for (const r of rows) pool[r.id] = { ...pool[r.id], ...r, source, seenAt: now() };
+    for (const [id, r] of Object.entries(pool)) {
+      const dl = deadlineMs(r.deadline);
+      if ((dl && dl < now()) || now() - r.seenAt > 4 * 86400e3) delete pool[id];
+    }
+  }
+
+  async function scanMarket(progress = () => {}) {
+    const keepPage = db.market; // the scan reuses the page parser; restore what the user is looking at
+    let n = 0;
+    const take = async (url, label) => {
+      const { doc } = await fetchDoc(url);
+      const msg = parseMarketPage(doc, new URL(url, location.origin));
+      if (!msg) return 0;
+      mergeListings(db.market.rows, label);
+      return db.market.rows.length;
+    };
+    for (const s of scanQueries(computePlan())) {
+      for (let page = 1; page <= SCAN_PAGES; page++) {
+        progress(`Market: ${s.line} ${s.kind} p${page}…`);
+        const got = await take(searchUrl({ ...s.q, pid: String(page) }), 'scan');
+        n += got;
+        if (got < 30) break; // last page
+        await sleep(150);
+      }
+      await sleep(120);
+    }
+    for (const [line, act] of Object.entries(FREE_SORT)) {
+      progress(`Free players: ${line}…`);
+      n += await take(`/lista_livres.asp?action=${act}&gid=1&sort=0&pv=1`, 'free');
+      await sleep(150);
+    }
+    db.market = keepPage;
+    db.scan.at = now();
+    save();
+    return n;
+  }
+
+  // How much to put into one player: a share of the money in the bank, not of the "spendable" estimate.
+  function buyCaps() {
+    const funds = db.economy?.funds ?? db.me.funds ?? 0;
+    const pct = db.prefs.buyPct || 0.35;
+    return { funds, max: Math.max(0, funds * pct), budget: Math.max(0, funds * pct * 0.4), pct };
+  }
+
+  // What a player of this level costs: log(price) ~ rating now + growth to 26 + youth (ridge least squares).
+  // Learns from the game's Value once we know 12+ (asks are only auction floors), else from asks.
+  function fairPriceModel(rows) {
+    const vals = db.playerValues || {};
+    const byValue = rows.filter(r => vals[r.id]?.value > 0).length >= 12;
+    const target = r => (byValue ? vals[r.id]?.value : r.price);
+    const data = rows.filter(r => target(r) > 0 && r.age && r.line).map(r => {
+      const v = valuePath(r, { line: r.line, lane: (r.sides || 'C')[0], code: '' }, null);
+      return { x: [1, v.now, v.at26 - v.now, Math.max(0, 24 - r.age)], y: Math.log(target(r)) };
+    });
+    if (data.length < 12) return null;
+    const k = 4, A = Array.from({ length: k }, (_, i) => Array.from({ length: k }, (_, j) => (i === j && i ? 1 : 0))), b = new Array(k).fill(0);
+    for (const d of data) for (let i = 0; i < k; i++) { b[i] += d.x[i] * d.y; for (let j = 0; j < k; j++) A[i][j] += d.x[i] * d.x[j]; }
+    // Gaussian elimination on the 4×4 normal equations
+    for (let i = 0; i < k; i++) {
+      let p = i; for (let r = i + 1; r < k; r++) if (Math.abs(A[r][i]) > Math.abs(A[p][i])) p = r;
+      [A[i], A[p]] = [A[p], A[i]]; [b[i], b[p]] = [b[p], b[i]];
+      for (let r = i + 1; r < k; r++) { const f = A[r][i] / A[i][i]; for (let c = i; c < k; c++) A[r][c] -= f * A[i][c]; b[r] -= f * b[i]; }
+    }
+    const w = new Array(k).fill(0);
+    for (let i = k - 1; i >= 0; i--) w[i] = (b[i] - sum(A[i].slice(i + 1).map((a, j) => a * w[i + 1 + j]))) / A[i][i];
+    return { n: data.length, byValue, price: r => { const v = valuePath(r, { line: r.line, lane: (r.sides || 'C')[0], code: '' }, null); return Math.exp(w[0] + w[1] * v.now + w[2] * (v.at26 - v.now) + w[3] * Math.max(0, 24 - r.age)); } };
+  }
+
+  // How much each XI slot matters in this match model: expected points gained from +1 rating there.
+  function slotImpact(plan) {
+    const b = plan.best;
+    const base = { style: b.style, passing: b.passing, home: plan.home, attitude: 'Normal', atWon: b.ats?.won || 0, pref: plan.pref };
+    const pts = r => 3 * r.w + r.d;
+    const ref = pts(simulate({ ...base, z: toStars(zonesFor(b.xi), plan.cal) }, plan.oppSide));
+    const raw = b.xi.map((x, i) => {
+      const xi = b.xi.map((y, j) => (j === i ? { ...y, score: y.score + 1 } : y));
+      return Math.max(1e-4, pts(simulate({ ...base, z: toStars(zonesFor(xi), plan.cal) }, plan.oppSide)) - ref);
+    });
+    const mean = avg(raw);
+    return new Map(b.xi.map((x, i) => [x.slot, raw[i] / mean])); // 1 = average slot
+  }
+
+  // Every listing evaluated at every XI slot of its own line, then the shortlists and a per-slot board.
+  function recruitBoard(plan) {
+    if (!plan?.best) return null;
+    const listings = Object.values(db.scan?.rows || {});
+    for (const r of db.market?.rows || []) if (!listings.some(x => x.id === r.id)) listings.push(r);
+    const mine = new Set((db.squad?.players || []).map(p => p.id));
+    const cands = listings.filter(r => !mine.has(r.id) && r.line);
+    const caps = buyCaps();
+    const fair = fairPriceModel(cands);
+    const roof = db.club?.wageRoof, bill = (db.club?.wages || 0) + (db.club?.pendingWages || 0);
+    const ours = plan.best.xi.map(x => { const pl = plan.pool.find(q => q.id === x.p.id) || x.p; return { x, v: valuePath(pl, x.slot, plan) }; });
+    const evals = [];
+    for (const c of cands) {
+      const fairP = fair?.price(c), gameValue = db.playerValues?.[c.id]?.value;
+      // the ask is only an auction floor; completed transfers went for ~half the player's Value
+      // (median 0.46, ~0.5–0.66 under $750k). Free agents cost a 12-week signing fee instead.
+      const worth = gameValue || (fair?.byValue ? fairP : 0) || 0;
+      const expPrice = c.free ? 12 * (c.wage || 0) : Math.max(c.price || 0, AUCTION_RATIO * worth);
+      const cost = expPrice + (c.wage || 0) * 11; // + a season of wages
+      for (const o of ours) {
+        if (o.x.slot.line !== c.line) continue;
+        const v = valuePath(c, o.x.slot, plan);
+        const d5 = seasonGain(v, o.v, c.age);
+        evals.push({ c, slot: o.x.slot, vs: o.x.p, v, ov: o.v, d5, dNow: v.now - o.v.now, d26: v.at26 - o.v.at26, cost, perM: cost > 0 ? d5 / (cost / 1e6) : d5 * 10, fair: fairP, value: gameValue, expPrice, cheap: fair?.byValue && fairP && gameValue ? fairP / gameValue : null, wageOk: !roof || !c.wage || bill + c.wage <= roof });
+      }
+    }
+    // weight every gain by how much that slot moves results in this model, so priority positions lead
+    const impact = slotImpact(plan);
+    for (const e of evals) { e.imp = impact.get(e.slot) || 1; e.w = e.d5 * e.imp; e.roi = e.cost > 0 ? e.w / (e.cost / 1e6) : e.w * 10; }
+    const bestPer = new Map();
+    for (const e of evals) if (!bestPer.has(e.c.id) || e.w > bestPer.get(e.c.id).w) bestPer.set(e.c.id, e);
+    const uniq = [...bestPer.values()].filter(e => e.d5 > 0.5 && e.wageOk);
+    const within = cap => uniq.filter(e => e.expPrice <= cap);
+    // the cream only: highest first, one per position, nobody twice
+    const taken = new Set();
+    const pick = (arr, key, n) => {
+      const out = [], slotsUsed = new Set();
+      for (const e of arr.slice().sort((a, b) => key(b) - key(a))) {
+        if (out.length >= n) break;
+        if (slotsUsed.has(e.slot) || taken.has(e.c.id)) continue;
+        out.push(e); slotsUsed.add(e.slot); taken.add(e.c.id);
+      }
+      return out;
+    };
+    const best = pick(within(caps.max), e => e.w, 3);
+    // value: most priority-weighted gain per $1M of expected cost (fee + a season of wages); a real upgrade only
+    const value = pick(within(caps.max).filter(e => e.d5 > 1.5), e => e.roi * (e.cheap ? Math.min(1.5, e.cheap) : 1), 3);
+    // what more money would buy: biggest upgrades above the cap, under 30, within 80% of funds
+    const stretch = pick(uniq.filter(e => e.expPrice > caps.max && e.expPrice <= caps.funds * 0.8 && e.c.age < 30), e => e.w, 2);
+    const slots = ours.map(o => {
+      const forSlot = evals.filter(e => e.slot === o.x.slot && e.d5 > 0.5 && e.wageOk && e.expPrice <= caps.max);
+      const one = key => forSlot.slice().sort((a, b) => key(b) - key(a))[0] || null;
+      return { slot: o.x.slot, starter: o.x.p, ov: o.v, imp: impact.get(o.x.slot) || 1, best: one(e => e.w), value: one(e => e.roi) };
+    }).sort((a, b) => b.imp - a.imp);
+    return { caps, fair, best, value, stretch, slots, n: cands.length, scannedAt: db.scan?.at };
+  }
+
+  // The game's own Value for the shortlist (player page), to show how far under value a price is.
+  async function fetchValues(entries, progress = () => {}) {
+    db.playerValues = db.playerValues || {};
+    for (const e of entries) {
+      if (db.playerValues[e.c.id] && now() - db.playerValues[e.c.id].at < 86400e3) continue;
+      progress(`Value: ${e.c.name}…`);
+      try {
+        const { doc } = await fetchDoc('/ver_jogador.asp?jog_id=' + e.c.id);
+        const v = num((flatText(doc.body).match(/Contract Length\s*\d+\s*years?\s*Wage\s*\$?[\d.,]+\s*Value\s*\$?([\d.,]+)/i) || flatText(doc.body).match(/\bValue\s*\$([\d.,]+)/) || [])[1]);
+        if (isFinite(v)) db.playerValues[e.c.id] = { value: v, at: now() };
+      } catch { /* skip */ }
+      await sleep(120);
+    }
+    save();
+  }
+  async function runScan(progress = () => {}) {
+    const n = await scanMarket(progress);
+    // a fetched Value can push a player over budget, so refill the shortlist once and value the newcomers
+    for (let pass = 0; pass < 2; pass++) {
+      const board = recruitBoard(computePlan());
+      if (!board) break;
+      const short = [...new Map([...board.best, ...board.value, ...board.stretch, ...board.slots.flatMap(s => [s.best, s.value])].filter(Boolean).map(e => [e.c.id, e])).values()].filter(e => !e.c.free);
+      await fetchValues(short, progress);
+    }
+    logAction('market', `Scanned ${n} listings · ${Object.keys(db.scan?.rows || {}).length} live`);
+    return [`${Object.keys(db.scan?.rows || {}).length} live listings scanned`];
   }
 
   /* =========================================================================
@@ -2219,6 +2429,7 @@
       if (db.prefs.autoRefresh && (!db.lastRefresh || now() - db.lastRefresh > 6 * 3600e3)) await step('Refreshing data', () => refreshAll(setStatus));
       if (db.prefs.autoRefresh && scoutStale()) await step('Scouting', () => scoutOpponent(setStatus));
       if (db.prefs.autoLearn) await step('Learning', () => learn(setStatus)); // recalibrate before any decision
+      if (db.prefs.autoLearn && (!db.scan?.at || now() - db.scan.at > 12 * 3600e3)) await step('Market scan', () => runScan(setStatus));
       if (db.next && db.prefs.autoApply) await step('Match orders', () => applyOrders({ force: forceOrders }));
       if (db.next) recordDecision();
       if (db.next && db.prefs.autoEvents) await step('Match events', autoEvents);
@@ -2576,16 +2787,33 @@ input.txt{flex:1;height:26px;border:1px solid var(--line);background:var(--bg);c
     const s = scoutingAdvice(plan);
     const fin = clubAdvice().fin;
     let h = '';
+    const B = recruitBoard(plan);
+    if (B) {
+      const sg = v => `${v >= 0 ? '+' : ''}${f1(v)}`;
+      const money = v => (v >= 1e6 ? `$${(v / 1e6).toFixed(2)}M` : `$${Math.round(v / 1e3)}k`);
+      const tag = e => [e.c.free ? chip('free agent', 'g') : '', e.c.age >= 31 ? chip('short-term', 'w') : '', e.cheap && e.cheap >= 1.4 ? chip('game undervalues him', 'g') : '', !e.c.free && !e.value ? chip('value unknown', 'w') : ''].join('');
+      const row = e => `<tr title="${esc(`vs ${e.vs.name}: now ${f1(e.ov.now)}, at 26 ${f1(e.ov.at26)}`)}"><td><a href="/ver_jogador.asp?jog_id=${esc(e.c.id)}" style="color:inherit;font-weight:600">${esc(e.c.name)}</a><div class="xs mut">${e.c.age} · ${esc(e.c.line)}${esc(e.c.sides || '')} · ${esc(e.c.quality || '?')}/${esc(e.c.potential || '?')}${e.c.talent ? ' · ' + esc(e.c.talent) : ''}${e.c.deadline ? ' · ends ' + esc(e.c.deadline.slice(0, 8)) : ''}</div>${tag(e) ? `<div style="margin-top:2px">${tag(e)}</div>` : ''}</td><td>${chip(e.slot.code)}<div class="xs mut">${esc(surname(e.vs.name))}</div></td><td class="n"><b style="color:var(--good)">${sg(e.d5)}</b><div class="xs mut">now ${sg(e.dNow)}</div></td><td class="n" title="Expected winning bid: the ask (an auction floor) or about half his Value — what completed transfers typically went for. Free agents: 12-week signing fee.">≈${money(e.expPrice)}<div class="xs mut">${e.c.free ? 'signing fee' : `ask ${money(e.c.price || 0)}${e.value ? ` · value ${money(e.value)}` : ''}`}${e.c.wage ? ` · ${money(e.c.wage)}/wk` : ''}</div></td></tr>`;
+      const tbl = arr => (arr.length ? `<table><tr><th>Player</th><th>As</th><th class="n">5 seasons</th><th class="n">Expect</th></tr>${arr.map(row).join('')}</table>` : '<div class="sm mut">Nothing that improves your XI at this price yet.</div>');
+      h += sec('recruit', 'Recruitment', `<div class="row sp wr"><span class="sm">Funds <b>${money(B.caps.funds)}</b> · up to <b>${money(B.caps.max)}</b> per player</span><span class="seg">${[0.2, 0.35, 0.5].map(p => `<button data-buypct="${p}" class="${Math.abs(B.caps.pct - p) < 0.01 ? 'on' : ''}">${Math.round(p * 100)}%</button>`).join('')}</span></div>
+        <div class="row" style="margin-top:6px"><button class="btn p" data-act="scan" ${busy ? 'disabled' : ''}>${B.scannedAt ? 'Rescan market' : 'Scan market'}</button><span class="xs mut">${B.n} live listings${B.scannedAt ? ' · ' + ago(B.scannedAt) : ''}</span></div>
+        <div class="xs mut" style="margin-top:6px">Every position and the free-agent list, each player rated in every slot of his line against your starter over 5 seasons, weighted by how much that slot decides matches. Cost = expected winning bid (≈ half his Value, never below the ask) + a season of wages.</div>`);
+      h += sec('rbest', 'Best buys', tbl(B.best) + '<div class="xs mut" style="margin-top:6px">Biggest upgrades you can afford, priority positions first — one per position.</div>', { right: `≤ ${money(B.caps.max)}` });
+      h += sec('rvalue', 'Best value', tbl(B.value) + '<div class="xs mut" style="margin-top:6px">Most upgrade per $1M (including free agents and short-term fixes).</div>', { right: 'return per $' });
+      if (B.stretch.length) h += sec('rstretch', 'Worth saving for', tbl(B.stretch) + '<div class="xs mut" style="margin-top:6px">Bigger long-term upgrades above your cap (under 30).</div>', { right: `> ${money(B.caps.max)}`, open: false });
+      h += sec('rslots', 'By position', `<table><tr><th>Slot</th><th>Starter</th><th>Best</th><th>Value</th></tr>${B.slots.map(s => `<tr><td>${chip(s.slot.code)}<div class="xs mut" title="How much this slot decides matches (1 = average)">×${s.imp.toFixed(1)}</div></td><td class="xs">${esc(surname(s.starter.name))}<div class="mut">${f1(s.ov.now)} → ${f1(s.ov.at26)}</div></td>${[s.best, s.value].map(e => `<td class="xs">${e ? `<a href="/ver_jogador.asp?jog_id=${esc(e.c.id)}" style="color:inherit;font-weight:600">${esc(surname(e.c.name))}</a> <span style="color:var(--good)">${sg(e.d5)}</span><div class="mut">${e.c.age}y · ≈${money(e.expPrice)}</div>` : '<span class="mut">—</span>'}</td>`).join('')}</tr>`).join('')}</table><div class="xs mut" style="margin-top:6px">Ordered by how much each position decides matches in the current model (×1 = average).</div>`, { open: false });
+    }
     if (db.market?.rows?.length) {
       const ranked = rankCandidates(db.market.rows, plan);
       const vchip = r => (r.verdict === 'buy' ? chip('Buy', 'g') : r.verdict === 'develop' ? chip('Develop', 'w') : chip('Skip'));
       const sg = v => `${v >= 0 ? '+' : ''}${f1(v)}`;
-      h += sec('market', 'Market — ranked for your team', `<table><tr><th>Player</th><th>As</th><th class="n">Now</th><th class="n">@26</th><th class="n">5 seasons</th><th class="n">Price</th></tr>${ranked.map(r => `<tr title="${esc(`vs ${r.vs.name}: now ${f1(r.ov.now)}, at 26 ${f1(r.ov.at26)}`)}"><td><a href="/ver_jogador.asp?jog_id=${esc(r.c.id)}" style="color:inherit;font-weight:600">${esc(r.c.name)}</a><div class="xs mut">${r.c.age} · ${esc(r.c.line || '')}${esc(r.c.sides || '')} · ${esc(r.c.quality || '?')}/${esc(r.c.potential || '?')}${r.c.talent ? ' · ' + esc(r.c.talent) : ''}</div><div style="margin-top:2px">${vchip(r)}${!r.afford ? chip('over budget', 'x') : ''}${!r.wageOk ? chip('wage roof', 'x') : ''}</div></td><td>${chip(r.slot.code)}<div class="xs mut">${esc(surname(r.vs.name))}</div></td><td class="n">${f1(r.v.now)}<div class="xs" style="color:${r.dNow >= 0 ? 'var(--good)' : 'var(--bad)'}">${sg(r.dNow)}</div></td><td class="n">${f1(r.v.at26)}<div class="xs" style="color:${r.d26 >= 0 ? 'var(--good)' : 'var(--bad)'}">${sg(r.d26)}</div></td><td class="n"><b style="color:${r.d5 >= 0 ? 'var(--good)' : 'var(--bad)'}">${sg(r.d5)}</b></td><td class="n">${r.c.price ? fmt$(r.c.price) : '<span class="mut">no ask</span>'}<div class="xs mut">${r.c.wage ? fmt$(r.c.wage) + '/wk' : ''}</div></td></tr>`).join('')}</table>
+      h += sec('market', 'This search page', `<table><tr><th>Player</th><th>As</th><th class="n">Now</th><th class="n">@26</th><th class="n">5 seasons</th><th class="n">Price</th></tr>${ranked.map(r => `<tr title="${esc(`vs ${r.vs.name}: now ${f1(r.ov.now)}, at 26 ${f1(r.ov.at26)}`)}"><td><a href="/ver_jogador.asp?jog_id=${esc(r.c.id)}" style="color:inherit;font-weight:600">${esc(r.c.name)}</a><div class="xs mut">${r.c.age} · ${esc(r.c.line || '')}${esc(r.c.sides || '')} · ${esc(r.c.quality || '?')}/${esc(r.c.potential || '?')}${r.c.talent ? ' · ' + esc(r.c.talent) : ''}</div><div style="margin-top:2px">${vchip(r)}${!r.afford ? chip('over budget', 'x') : ''}${!r.wageOk ? chip('wage roof', 'x') : ''}</div></td><td>${chip(r.slot.code)}<div class="xs mut">${esc(surname(r.vs.name))}</div></td><td class="n">${f1(r.v.now)}<div class="xs" style="color:${r.dNow >= 0 ? 'var(--good)' : 'var(--bad)'}">${sg(r.dNow)}</div></td><td class="n">${f1(r.v.at26)}<div class="xs" style="color:${r.d26 >= 0 ? 'var(--good)' : 'var(--bad)'}">${sg(r.d26)}</div></td><td class="n"><b style="color:${r.d5 >= 0 ? 'var(--good)' : 'var(--bad)'}">${sg(r.d5)}</b></td><td class="n">${r.c.price ? fmt$(r.c.price) : '<span class="mut">no ask</span>'}<div class="xs mut">${r.c.wage ? fmt$(r.c.wage) + '/wk' : ''}</div></td></tr>`).join('')}</table>
         <div class="xs mut" style="margin-top:6px">Each player is rated in the slot where he helps most and compared with the starter there. <b>Now</b> = today; <b>@26</b> = projected at 26 (last age before decline); <b>5 seasons</b> = summed gap over the next five seasons, discounted 15%/yr — the main ranking. Growth uses his potential grade, −25%/yr from 21, skill losses from 27.</div>`,
-        { right: `${ranked.filter(r => r.verdict === 'buy').length} buy · ${ranked.filter(r => r.verdict === 'develop').length} develop · ${ago(db.market.at)}` });
+        { right: `${ranked.filter(r => r.verdict === 'buy').length} buy · ${ranked.filter(r => r.verdict === 'develop').length} develop · ${ago(db.market.at)}`, open: false });
     }
-    h += sec('weak', 'Weakest spots', `<table><tr><th>Slot</th><th>Starter</th><th class="n">Rtg</th><th class="n">Backup</th></tr>${s.slots.slice(0, 6).map(x => `<tr><td>${chip(x.slot.code)}</td><td>${esc(x.p.name)}</td><td class="n">${f1(x.score)}</td><td class="n">${x.depth || '<span style="color:var(--bad)">0</span>'}</td></tr>`).join('')}</table>`);
-    h += sec('buy', 'Who to buy', (s.targets.length ? list(s.targets.map(t => ({ lvl: 'info', html: `<b>${t.slot.code}</b> — ${esc(t.profile)}; ≤ 23, potential ≥ Good. Replaces ${esc(t.cur.name)} (${f1(t.curScore)})${t.depth === 0 ? '; no backup today' : ''}.` }))) : '<div class="sm mut">No clear holes — buy young for potential.</div>') + `<div class="xs mut" style="margin-top:6px">Closed-bid 3-day auctions. Bosman/free signings: 30% selling tax first season; free agents cost 12× weekly wage up front.</div>`, { right: `budget ≈ ${fmt$(fin.spendable)}` });
+    if (!B?.scannedAt) {
+      h += sec('weak', 'Weakest spots', `<table><tr><th>Slot</th><th>Starter</th><th class="n">Rtg</th><th class="n">Backup</th></tr>${s.slots.slice(0, 6).map(x => `<tr><td>${chip(x.slot.code)}</td><td>${esc(x.p.name)}</td><td class="n">${f1(x.score)}</td><td class="n">${x.depth || '<span style="color:var(--bad)">0</span>'}</td></tr>`).join('')}</table>`);
+      h += sec('buy', 'Who to buy', (s.targets.length ? list(s.targets.map(t => ({ lvl: 'info', html: `<b>${t.slot.code}</b> — ${esc(t.profile)}; ≤ 23, potential ≥ Good. Replaces ${esc(t.cur.name)} (${f1(t.curScore)})${t.depth === 0 ? '; no backup today' : ''}.` }))) : '<div class="sm mut">No clear holes — buy young for potential.</div>') + `<div class="xs mut" style="margin-top:6px">Closed-bid 3-day auctions. Bosman/free signings: 30% selling tax first season; free agents cost 12× weekly wage up front.</div>`, { right: `budget ≈ ${fmt$(fin.spendable)}` });
+    }
     h += sec('page', 'Players on this page', `<button class="btn" data-act="evalpage">Compare with my XI</button>${pageEval ? (pageEval.length ? `<table style="margin-top:8px"><tr><th>Player</th><th>Slot</th><th class="n">Δ</th></tr>${pageEval.slice(0, 25).map(e => `<tr><td>${esc(e.p.name)} <span class="xs mut">${esc(e.p.line || '')}${esc(e.p.sides || '')} ${e.p.age || ''}</span></td><td>${chip(e.slot.code)}</td><td class="n" style="color:${e.d > 0 ? 'var(--good)' : 'var(--mut)'}">${e.d > 0 ? '+' : ''}${f1(e.d)}</td></tr>`).join('')}</table>` : '<div class="xs mut" style="margin-top:6px">No players with visible skills here.</div>') : ''}`, { open: !!pageEval });
     return h;
   }
@@ -2656,6 +2884,7 @@ input.txt{flex:1;height:26px;border:1px solid var(--line);background:var(--bg);c
     if (t === fab) return setOpen(!panel.classList.contains('open'));
     if (t.dataset.tab) { tab = t.dataset.tab; db.prefs.tab = tab; GM_setValue(KEY, JSON.stringify(db)); body.scrollTop = 0; return render(); }
     if (t.dataset.obj) { db.prefs.objective = t.dataset.obj; save(); return render(); }
+    if (t.dataset.buypct) { db.prefs.buyPct = +t.dataset.buypct; save(); return render(); }
     if (t.dataset.ex) {
       const ex = new Set(db.prefs.excluded);
       if (ex.has(t.dataset.ex)) ex.delete(t.dataset.ex); else ex.add(t.dataset.ex);
@@ -2668,6 +2897,7 @@ input.txt{flex:1;height:26px;border:1px solid var(--line);background:var(--bg);c
       case 'close': return setOpen(false);
       case 'refresh': return runBusy(refreshAll, 'Refreshing');
       case 'scout': return runBusy(scoutOpponent, 'Scouting');
+      case 'scan': return runBusy(runScan, 'Scanning market');
       case 'pilot': return autoPilot({ forceOrders: false });
       case 'copy': GM_setClipboard(planText(computePlan())); return toast('Plan copied');
       case 'snapshot': GM_setClipboard(snapshot()); return toast('Snapshot copied');
@@ -2720,5 +2950,5 @@ input.txt{flex:1;height:26px;border:1px solid var(--line);background:var(--bg);c
   boot();
   if (GM_getValue('pmc_open', false)) setOpen(true);
   if (window.__PMC_TEST) window.__PMC_TEST.version = VERSION;
-  if (window.__PMC_TEST) window.__PMC_TEST.api = { db: () => db, ingest, fetchDoc, grab, parseSkillPlayers, computePlan, trainingAdvice, clubAdvice, staffAdvice, scoutOpponent, refreshAll, calibration, snapshot, render, setOpen, planEvents, lectureChoice, autoPilot, applyOrders, autoEvents, autoLecture, autoRenew, autoTraining, prep, rankCandidates, badgeMarketRows, valuePath, learn, calibrateModel, gradeMatches, learnSummary, recordGrowth, recordDecision };
+  if (window.__PMC_TEST) window.__PMC_TEST.api = { db: () => db, ingest, fetchDoc, grab, parseSkillPlayers, computePlan, trainingAdvice, clubAdvice, staffAdvice, scoutOpponent, refreshAll, calibration, snapshot, render, setOpen, planEvents, lectureChoice, autoPilot, applyOrders, autoEvents, autoLecture, autoRenew, autoTraining, prep, rankCandidates, badgeMarketRows, valuePath, learn, calibrateModel, gradeMatches, learnSummary, recordGrowth, recordDecision, scanMarket, runScan, recruitBoard, fairPriceModel, searchUrl };
 })();

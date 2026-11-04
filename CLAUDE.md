@@ -28,7 +28,8 @@ Single-file Tampermonkey userscript: `pm-copilot.user.js` (one IIFE) for pmanage
 ## File map (grep names; line numbers drift)
 - Parsers: `parseSquadPage`, `parseTrainingPage`, `parseEconomyPage`, `parseAcademyPage`, `parseInfoPage` (stadium or club), `parseSponsorsPage`, `parseFixturesPage`, `parseNextMatchPage`, `parseReportPage` (zones from `#ratings .rz-vs[title]`, ATs from `#stats`, players `.mr-pp[data-jog]`, weather), `parseLineupPage` (live only — client-rendered), `parseTeamPage` (`ver_equipa`, `&vjog=1` roster), `parsePlayerPage` (own details / scouted skills), `parseContractsPage`, `parseOpponentPage` (`prox_adv.asp`, last-20 formations), `parseLecturePage`, `parseEventsPage`, `parseStaffPage` (`eqtecnica.asp`, `fase=1` wages), `parseMarketPage` (`procurar.asp` results). Router: `ROUTES` + `ingest`.
 - Model: `roleSkill`, `posFactor`, `slotScore`, `bestXI` (Hungarian), `zonesFor`, `calibration` (model pts → stars), `toStars`, `evalATs`/`decideATs` (in-game AT rules), `sideMult`, `goalRate`, `simulate`, `opponentModel` (engine zone stars from reports, last-20 shape, quality-grade/scouted skills), `computePlan`, `shown` (25% pundit blend).
-- Player value: `GROWTH`, `projectSkills`, `valuePath` (@26 + 5-season path), `talentBonus`, `rankCandidates`, `badgeMarketRows`.
+- Player value: `GROWTH`, `projectSkills`, `valuePath` (@26 + 5-season path), `careerWeight`/`seasonGain` (retirement-weighted 5-season gain), `talentBonus`, `rankCandidates`, `badgeMarketRows`.
+- Recruitment: `scanQueries`/`scanMarket` (search `procurar.asp?action=proc_jog` GET, 30/page via `pid`, skill filters from our starters + price cap; free agents `lista_livres.asp`, page = `gid`), `mergeListings` (`db.scan`), `buyCaps` (share of funds, `prefs.buyPct`), `fairPriceModel`, `slotImpact` (+1 rating → expected points per slot), `recruitBoard` (Best buys / Best value / Worth saving for / By position), `fetchValues`, `runScan`. `AUCTION_RATIO` = fee/Value from completed transfers.
 - Actions: `applyXI`/`applyPlan` (page's own `setPlayer`/`removePlayer`), `withFrame` (hidden same-origin iframe), `applyOrders`, `autoTraining`, `autoRenew`, `planEvents`/`autoEvents` (POST `eventos.asp?action=guardar`; own events tracked in `db.myEvents`, recognised by `SCRIPT_EVENT_RE`), `autoLecture` (`lectureChoice` = change × (2p−1)).
 - Advice: `trainingAdvice`, `clubAdvice`, `staffAdvice`, `scoutingAdvice`.
 - UI: `render`, `view*` per tab, `sec`/`chip`/`list` helpers, `PAGE_TAB` (tab per page).
@@ -40,6 +41,7 @@ Single-file Tampermonkey userscript: `pm-copilot.user.js` (one IIFE) for pmanage
 - Lecture buttons disappear once a lecture is given — `parseLecturePage().available` guards double lectures.
 - `prox_adv.asp` counts run into the next formation (`×194-4-2`) — keep the lazy regex.
 - Report formation labels ("5-2-3") don't match ours — compare starting XI ids, not labels.
+- A listing's "Ask. Price" is the auction floor, not the cost — always budget on expected cost (`AUCTION_RATIO` × Value, never below the ask).
 
 ## Offline tools (optional, for Claude's deeper analysis)
 `tools/harvest.js` (run in a signed-in browser tab; read-only; writes via `tools/server.py` into `data/`), `model/fit.js` (same fit + grades + weather/AT/growth tables → `model/report.md`), `tools/release.js` (writes `model/params.json` into the script's starting values). `data/` is git-ignored.
