@@ -17,7 +17,7 @@ Updates install themselves (Tampermonkey checks GitHub; *Utilities → Check for
 | Tab | |
 |---|---|
 | **Match** | Match-prep checklist; best formation, XI, style and passing across ~1000 combinations; opponent's real engine zone ratings, last-20 formations, tired players; every advanced tactic checked against the in-game rules; attitude, captain, penalty taker, alternatives. |
-| **Squad** | Ratings, fitness, form, projected rating at 26, contract years; contracts needing attention. |
+| **Squad** | Ratings, fitness, form, projected rating at 26, contract years; contracts needing attention; main / B / youth team moves. |
 | **Training** | Best individual and staff training per player. |
 | **Club** | Finances vs wage roof; staff Hire/Keep/Skip from live wages; stadium, academy, sponsor advice. |
 | **Scout** | Any transfer search ranked for your team (Now · @26 · 5-season gap vs the starter he'd replace) with Buy/Develop/Skip badges in the game's table. |
@@ -25,7 +25,7 @@ Updates install themselves (Tampermonkey checks GitHub; *Utilities → Check for
 
 ## 🤖 Autopilot (each switch on by default)
 
-On any pmanager page it keeps the next match prepared: match orders (saved), match events (your own events are never touched), the best-expected-value lecture, training, and renewals of keepers at their minimum asked wage within the wage roof. Bids, purchases, staff hires and facility builds stay advice only.
+On any pmanager page it keeps the next match prepared: match orders (saved), match events (your own events are never touched), the best-expected-value lecture, training, renewals of keepers at their minimum asked wage within the wage roof, youth-team moves (17–18-year-olds outside the XI train at full strength there), and the academy speciality once a season when it pays and funds allow. Bids, purchases, staff hires and other facility builds stay advice only.
 
 ## 🧠 How it learns
 

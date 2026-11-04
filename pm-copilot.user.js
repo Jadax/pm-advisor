@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PM Copilot — Planetarium Manager assistant
 // @namespace    pm-copilot
-// @version      0.10.0
+// @version      0.11.0
 // @description  Opponent-aware tactics, match prep autopilot, training, transfers, finance and facilities for pmanager.org — learns from every match. Changelog: github.com/Jadax/pm-advisor
 // @author       Tushant Sharma
 // @license      MIT
@@ -23,7 +23,7 @@
 (() => {
   'use strict';
   if (window.top !== window.self) return;
-  const VERSION = '0.10.0';
+  const VERSION = '0.11.0';
   const PAGE = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
 
   /* =========================================================================
@@ -106,7 +106,7 @@
    * Storage
    * ======================================================================= */
   const KEY = 'pmc_db_v2';
-  const blankDb = () => ({ me: {}, teams: {}, reports: {}, teamLinks: {}, details: {}, prefs: { excluded: [], objective: 'points', tab: 'match', autoRefresh: true, autoApply: true, autoSave: true, autoEvents: true, autoLecture: true, autoTraining: true, autoRenew: true, autoLearn: true } });
+  const blankDb = () => ({ me: {}, teams: {}, reports: {}, teamLinks: {}, details: {}, prefs: { excluded: [], objective: 'points', tab: 'match', autoRefresh: true, autoApply: true, autoSave: true, autoEvents: true, autoLecture: true, autoTraining: true, autoRenew: true, autoLearn: true, autoSpeciality: true, autoYouth: true } });
   let db;
   try { db = Object.assign(blankDb(), JSON.parse(GM_getValue(KEY, '{}'))); } catch { db = blankDb(); }
   db.prefs = Object.assign(blankDb().prefs, db.prefs);
@@ -285,6 +285,14 @@
   function parseSquadPage(doc, u) {
     const players = parseSkillPlayers(doc.body);
     if (!players.length) return null;
+    // tier from the row (0 main, 1 B team, 3 youth — the same codes as the page's equipa filter);
+    // a "↓ Youth Team" link means he may still go back to the youth team (17–18, from our academy)
+    for (const r of $$('tr.sq-row', doc)) {
+      const p = players.find(x => x.id && x.id === playerId(playerLink(r)));
+      if (!p) continue;
+      p.tier = num(r.dataset.sq);
+      p.toYouth = !!r.querySelector('a[href*="despromover"][href*="to=y"]');
+    }
     const text = docText(doc.body);
     db.squad = { players, wagesSum: num((text.match(/Wages Sum\s*\$?\s*([\d.,]+)/i) || [])[1]), url: u.pathname + u.search, at: now() };
     save();
@@ -408,6 +416,7 @@
       branchCost: m(/Building Cost\s*\$?\s*([\d.,]+)/i),
       newSpeciality: m(/New Speciality\s*\$?\s*([\d.,]+)/i),
       improvements: m(/Academy Improvements\s+(\d+)/i),
+      specChanges: m(/Speciality Changes\s+(\d+)/i),
       at: now(),
     };
     save();
@@ -1189,7 +1198,7 @@
   function squadPool() {
     const tr = db.training?.rows || [];
     const ex = new Set(db.prefs.excluded || []);
-    return (db.squad?.players || []).filter(p => !ex.has(p.name)).map(p => {
+    return (db.squad?.players || []).filter(p => !ex.has(p.name) && p.tier !== 3).map(p => { // youth team can't play
       const t = matchPlayer(p.name, tr, p.id);
       const d = db.details[p.id] || {};
       return { ...p, fit: t?.fit, potential: t?.potential, quality: t?.quality, form: d.form, experience: d.experience, professionalism: d.professionalism, penalties: d.penalties, rate: playerRate(p.id, t?.potential).rate };
@@ -1429,7 +1438,21 @@
           : { lvl: 'good', t: `${ac.limit - ac.promoted} academy promotions left — use them now.` });
       }
       if (ac.quality && !/world/i.test(ac.quality)) tips.push({ lvl: 'warn', t: `Academy is ${ac.quality}. Upgrade one level at a time (max 3/season); better academies produce higher-potential youth.` });
-      if (!ac.speciality || /none/i.test(ac.speciality)) tips.push({ lvl: 'info', t: `Speciality (${fmt$(ac.newSpeciality || 1000000)} + weekly cost) lets youth reach 20 in one skill but caps the rest at 8. Not worth it while the first team needs money.` });
+      const sp2 = specialityPlan(fin);
+      if (sp2) {
+        const p = sp2.pick, auto = db.prefs.autoSpeciality ? ' The autopilot sets it' : ' Set it';
+        const lines = min => Object.keys(YOUTH_LINES).filter(l => (ROLE_W[l][p.k] || 0) >= min && (min > 0.2 || (ROLE_W[l][p.k] || 0) < 0.2)).join('/');
+        const why = `${p.name} (main skill for ${lines(0.25) || '—'}, secondary for ${lines(0.11) || '—'}): each promoted youth starts ~${f1(p.pts)} main-skill points ahead ≈ ${fmt$(sp2.perSeason)}/season of player value vs ${fmt$(sp2.costSeason)} (≈${fmt$(sp2.weekly)}/week + ${fmt$(sp2.oneOff)} spread over ${HORIZON} seasons).`;
+        tips.push({
+          keep: { lvl: 'good', t: `Speciality ${sp2.has} — the best pick. Keep it.` },
+          'keep-other': { lvl: 'info', t: `Speciality ${sp2.has}; ${p.name} would add a little more, but a change costs ${fmt$(sp2.oneOff)} again — keep it.` },
+          skip: { lvl: 'info', t: `Speciality not worth it yet: ${why}` },
+          save: { lvl: 'info', t: `Speciality — ${why} Needs ${fmt$(sp2.need)} in funds (fee + a season of upkeep + safety buffer); you have ${fmt$(sp2.funds)}.` },
+          'next-season': { lvl: 'info', t: `Speciality already changed this season. ${p.name} next season. ${why}` },
+          wait: { lvl: 'info', t: `Speciality ${p.name} pays — ${why}${auto} at the start of next season, before promotions (this season's 10 are used).` },
+          set: { lvl: 'warn', t: `Speciality ${p.name} pays — ${why}${auto} now; promote this season's youth after it.` },
+        }[sp2.verdict]);
+      }
       tips.push({ lvl: 'info', t: `Academy branches (${fmt$(ac.branchCost || 200000)} + weekly) only add youth of another nationality — skip unless you need that.` });
     }
     const tr = trainingAdvice();
@@ -2160,6 +2183,99 @@
     return out;
   }
 
+  /* ---------- Academy speciality (manual §10) ----------
+   * A speciality makes every promoted youth start at 10–20 in that skill (instead of ≤10, ≤12 for
+   * Speed/Strength) but caps his other non-physical skills at 8. One change per season. Promoted
+   * positions are random, so a skill is worth what it adds across the lines youth land in. */
+  const SPEC_ID = { POS: 7, STR: 4, HAN: 8, HEA: 2, PAS: 1, FIN: 5, CRO: 9, TCK: 3, TEC: 6, SPE: 10, REF: 11, AGI: 12 };
+  const YOUTH_LINES = { GK: 0.1, D: 0.35, M: 0.35, F: 0.2 };
+  const WEEKS_PER_SEASON = 13;
+  const YOUTH_KEPT = 0.5; // share of promoted youth good enough to play or sell
+  function specialityPlan(fin) {
+    const ac = db.academy;
+    if (!ac?.quality || /none/i.test(ac.quality)) return null;
+    const MAIN = 0.27;
+    const use = k => sum(Object.entries(YOUTH_LINES).map(([l, s]) => s * (ROLE_W[l][k] || 0))) / MAIN;
+    // main-skill points gained per youth: spec skill averages 15 (vs ~6, physicals ~8), minus the 9–10s lost elsewhere
+    const opts = SKILLS.map(k => ({ k, name: SKILL_NAME[k], id: SPEC_ID[k], use: use(k), pts: (15 - (k === 'SPE' || k === 'STR' ? 8 : 6)) * use(k) - 0.9 }))
+      .sort((a, b) => b.pts - a.pts);
+    const pick = opts[0];
+    const oneOff = ac.newSpeciality || 1000000;
+    // the manual prices a speciality at 2× a World Class academy's upkeep; the page shows our real academy cost
+    const weekly = 2 * (ac.weekly || 15000);
+    const perSeason = (ac.limit || 10) * YOUTH_KEPT * pick.pts * POINT_VALUE;
+    const costSeason = weekly * WEEKS_PER_SEASON + oneOff / HORIZON;
+    const has = ac.speciality && !/none/i.test(ac.speciality) ? ac.speciality : null;
+    const funds = fin?.funds ?? db.me.funds;
+    const need = oneOff + weekly * WEEKS_PER_SEASON + (fin?.buffer ?? 300000);
+    const r = { opts, pick, oneOff, weekly, perSeason, costSeason, net: perSeason - costSeason, has, funds, need, changes: ac.specChanges };
+    if (has) r.verdict = norm(has) === norm(pick.name) ? 'keep' : 'keep-other';
+    else if (r.net <= 0) r.verdict = 'skip';
+    else if (!(funds >= need)) r.verdict = 'save';
+    else if (ac.specChanges > 0) r.verdict = 'next-season';
+    // only when this season's promotions are still to come, so the upkeep buys youth straight away
+    else if (isFinite(ac.promoted) && isFinite(ac.limit) && ac.promoted >= ac.limit) r.verdict = 'wait';
+    else r.verdict = 'set';
+    return r;
+  }
+  async function autoSpeciality() {
+    const { doc } = await fetchDoc('/academia.asp');
+    parseAcademyPage(doc);
+    const r = specialityPlan(clubAdvice().fin);
+    if (r?.verdict !== 'set') return;
+    const post = (url, body) => fetch(url, { method: 'POST', body: new URLSearchParams(body), credentials: 'include', headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
+    const res = await post('/academia.asp?action=nova_especialidade', { especialidade: String(r.pick.id) });
+    // "Next >>" leads to a confirmation form; submit it as-is
+    const d = new DOMParser().parseFromString(await res.text(), 'text/html');
+    const conf = Array.from(d.forms).find(f => /academia/i.test(f.getAttribute('action') || '') && !f.querySelector('select[name="academia"],select[name="especialidade"],select[name="country"]'));
+    if (conf) {
+      const body = {};
+      conf.querySelectorAll('input[name],select[name]').forEach(i => { if (!/checkbox|radio/.test(i.type) || i.checked) body[i.name] = i.value; });
+      await post(new URL(conf.getAttribute('action'), location.origin + '/').href, body);
+    }
+    await sleep(150);
+    const { doc: d2 } = await fetchDoc('/academia.asp');
+    parseAcademyPage(d2);
+    const ok = norm(db.academy?.speciality || '') === norm(r.pick.name);
+    logAction('academy', ok ? `Speciality set to ${r.pick.name} (${fmt$(r.oneOff)} + ~${fmt$(r.weekly)}/week)` : `Speciality ${r.pick.name}: not confirmed by the page`, ok);
+  }
+
+  /* ---------- Youth team (manual §9) ----------
+   * Youth-team players train at full league strength every league round without playing; a 17–18-year-old
+   * sitting out in the main squad gets the non-player penalty instead (nothing at all after cups/friendlies).
+   * They can't play while there, but can be promoted back any time. */
+  function youthMoves(plan) {
+    const players = db.squad?.players || [];
+    const xi = new Set((plan?.best?.xi || []).map(x => x.p.id));
+    const cover = line => players.filter(p => p.tier !== 3 && !p.toYouth && p.line === line && !xi.has(p.id)).length;
+    // keep 11 + 3 subs available, and a spare keeper
+    let avail = players.filter(p => p.tier !== 3).length;
+    const back = players.filter(p => p.toYouth && !xi.has(p.id)).map(p => {
+      const ok = (p.line !== 'GK' || cover('GK') > 0) && avail > 14;
+      if (ok) avail--;
+      return { p, ok, why: ok ? '' : avail <= 14 ? 'squad too thin' : 'only spare keeper' };
+    });
+    const bOld = players.filter(p => p.tier === 1 && p.age >= 22);
+    const youth = players.filter(p => p.tier === 3);
+    return { back, bOld, youth };
+  }
+  async function autoYouth() {
+    let plan;
+    try { plan = computePlan(); } catch { return; }
+    if (!plan?.best) return;
+    const moves = youthMoves(plan).back.filter(m => m.ok);
+    for (const { p } of moves) {
+      const res = await fetch(`/plantel.asp?action=despromover&to=y&jog_id=${p.id}&filtro=1&equipa=2`, { credentials: 'include' });
+      logAction('youth', `${p.name} (${p.age}) back to the youth team — full training every league round`, res.ok);
+      await sleep(150);
+    }
+    if (moves.length) {
+      const u = new URL('/plantel.asp?equipa=2&pos=', location.origin);
+      parseSquadPage((await fetchDoc(u.href)).doc, u);
+    }
+    db.youthCheckedAt = now();
+  }
+
   /* ---------- Match-day events, rebuilt for each match ---------- */
   const SCRIPT_EVENT_RE = /^(Style|Substitution)\s*(60'Losing, by 1\+|70'Losing, by 1\+|75'Drawing(?!\s*\/)|80'Winning, by 1(?!\+)|65'Winning, by 2\+|75'Winning, by 2\+)/;
   function planEvents(plan, reserved, maxSubs) {
@@ -2473,12 +2589,14 @@
       if (db.prefs.autoRefresh && scoutStale()) await step('Scouting', () => scoutOpponent(setStatus));
       if (db.prefs.autoLearn) await step('Learning', () => learn(setStatus)); // recalibrate before any decision
       if (db.prefs.autoLearn && (!db.scan?.at || now() - db.scan.at > 12 * 3600e3)) await step('Market scan', () => runScan(setStatus));
+      if (db.prefs.autoYouth && (!db.youthCheckedAt || now() - db.youthCheckedAt > 12 * 3600e3)) await step('Youth team', autoYouth); // before orders: it changes who is available
       if (db.next && db.prefs.autoApply) await step('Match orders', () => applyOrders({ force: forceOrders }));
       if (db.next) recordDecision();
       if (db.next && db.prefs.autoEvents) await step('Match events', autoEvents);
       if (db.next && db.prefs.autoLecture) await step('Lecture', autoLecture);
       if (db.prefs.autoTraining && (!db.trainingAppliedAt || now() - db.trainingAppliedAt > 12 * 3600e3)) await step('Training', async () => { await autoTraining(); db.trainingAppliedAt = now(); save(); });
       if (db.prefs.autoRenew && (!db.contractsCheckedAt || now() - db.contractsCheckedAt > 12 * 3600e3)) await step('Contracts', autoRenew);
+      if (db.prefs.autoSpeciality && specialityPlan(clubAdvice().fin)?.verdict === 'set') await step('Academy', autoSpeciality); // re-checks on a fresh page first
     } finally {
       piloting = false;
       setStatus(null);
@@ -2764,6 +2882,13 @@ input.txt{flex:1;height:26px;border:1px solid var(--line);background:var(--bg);c
       const f = p.t?.fit;
       return `<tr class="click ${ex.has(p.name) ? 'off' : ''}" data-ex="${esc(p.name)}"><td>${esc(p.name)}<div class="xs mut">${[p.t?.quality, p.t?.potential && 'pot ' + p.t.potential, p.form && 'form ' + p.form].filter(Boolean).map(esc).join(' · ')}</div></td><td class="xs" style="white-space:nowrap">${esc(p.line || '?')} ${esc(p.sides || '')}</td><td class="n">${p.age ?? ''}</td><td class="n">${isFinite(f) ? `<span style="color:${f < 80 ? 'var(--bad)' : f < 90 ? 'var(--warn)' : 'inherit'}">${f}</span>` : ''}</td><td class="n">${f1(roleSkill(p, p.line || 'M'))}</td><td class="n">${(() => { const v = valuePath({ ...p, potential: p.t?.potential }, { line: p.line || 'M', lane: (p.sides || 'C')[0], code: '' }, plan); const d = v.at26 - v.now; return `${f1(v.at26)}${d > 0.4 ? `<div class="xs" style="color:var(--good)">+${f1(d)}</div>` : ''}`; })()}</td><td class="n">${p.c ? `<span style="color:${p.c.years <= 1 ? 'var(--bad)' : 'inherit'}">${p.c.years}</span>` : ''}</td><td>${inXI.has(p.name) ? chip(inXI.get(p.name), 'g') : ''}</td></tr>`;
     }).join('')}</table><div class="xs mut" style="margin-top:6px">Tap a player to mark him unavailable. Rtg = weighted position skills (0–20).</div>`, { right: `${pool.length} available` });
+    const Y = youthMoves(plan);
+    const yt = [
+      ...Y.back.map(({ p, ok, why }) => ({ lvl: ok ? 'warn' : 'info', t: ok ? `${p.name} (${p.age}) isn't in the XI — back to the youth team for full training every league round${db.prefs.autoYouth ? ' (autopilot does it)' : ''}. He can be promoted again any time.` : `${p.name} (${p.age}) could go back to the youth team for full training, but stays: ${why}.` })),
+      ...Y.bOld.map(p => ({ lvl: 'warn', t: `${p.name} is ${p.age} and in the B team — no positive training there from 22. Move him to the main squad.` })),
+      ...(Y.youth.length ? [{ lvl: 'info', t: `Youth team: ${Y.youth.map(p => `${surname(p.name)} (${p.age})`).join(', ')} — training at full league strength; they can't play until promoted (automatic at 19).` }] : []),
+    ];
+    h += sec('tiers', 'Main · B · Youth', list(yt.length ? yt : [{ lvl: 'good', t: 'Everyone is in the right team.' }]) + '<div class="xs mut" style="margin-top:6px">Only the main squad plays matches (B-team players can be picked too). Youth team: academy players aged 17–18, no matches, full training every league round. B team: max 16, no matches of its own, reduced training, none from 22.</div>', { open: !!Y.back.some(m => m.ok) || !!Y.bOld.length });
     const rows = db.contracts?.rows || [];
     const starters = plannedStarters();
     const items = rows.filter(c => c.years <= 1 || c.wontRenew).map(c => {
@@ -2887,6 +3012,8 @@ input.txt{flex:1;height:26px;border:1px solid var(--line);background:var(--bg);c
       ${sw('autoLecture', 'Lecture', 'Once per match, the intensity with the best expected morale gain — none if all are negative.')}
       ${sw('autoTraining', 'Training', 'Individual orders and staff training, every 12 h.')}
       ${sw('autoRenew', 'Contract renewals', 'Keepers with 1 year left, at their minimum asked wage, within the wage roof.')}
+      ${sw('autoYouth', 'Youth team', '17–18-year-olds outside the XI go back to the youth team (full training every league round); keeps 14 players and a spare keeper.')}
+      ${sw('autoSpeciality', 'Academy speciality', 'Once a season, before promotions, when the model says it pays and funds stay above the safety buffer after the fee + a season of upkeep.')}
       ${sw('autoLearn', 'Learn & improve', 'Daily crawl of every division report; refits the match model and growth rates from them and grades its own forecasts.')}`, { right: `<button class="btn p" data-act="pilot" ${piloting ? 'disabled' : ''}>Run now</button>` });
     const m = db.model, L = learnSummary();
     const nReports = Object.keys(db.reports).length;
@@ -3009,5 +3136,5 @@ input.txt{flex:1;height:26px;border:1px solid var(--line);background:var(--bg);c
   boot();
   if (GM_getValue('pmc_open', false)) setOpen(true);
   if (window.__PMC_TEST) window.__PMC_TEST.version = VERSION;
-  if (window.__PMC_TEST) window.__PMC_TEST.api = { db: () => db, ingest, fetchDoc, grab, parseSkillPlayers, computePlan, trainingAdvice, clubAdvice, staffAdvice, scoutOpponent, refreshAll, calibration, snapshot, render, setOpen, planEvents, lectureChoice, autoPilot, applyOrders, autoEvents, autoLecture, autoRenew, autoTraining, prep, rankCandidates, badgeMarketRows, valuePath, learn, calibrateModel, gradeMatches, learnSummary, recordGrowth, recordDecision, scanMarket, runScan, recruitBoard, fairPriceModel, searchUrl };
+  if (window.__PMC_TEST) window.__PMC_TEST.api = { db: () => db, ingest, fetchDoc, grab, parseSkillPlayers, computePlan, trainingAdvice, clubAdvice, staffAdvice, scoutOpponent, refreshAll, calibration, snapshot, render, setOpen, planEvents, lectureChoice, autoPilot, applyOrders, autoEvents, autoLecture, autoRenew, autoTraining, prep, rankCandidates, badgeMarketRows, valuePath, learn, calibrateModel, gradeMatches, learnSummary, recordGrowth, recordDecision, scanMarket, runScan, recruitBoard, fairPriceModel, searchUrl, specialityPlan, youthMoves, autoYouth, autoSpeciality };
 })();
