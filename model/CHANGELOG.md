@@ -2,6 +2,10 @@
 
 Newest first. Written by the daily review (and by hand) whenever the data changes the engine.
 
+## 2026-11-04 — v0.11.3 (promotion push)
+- **Goal (user):** upgrade a weak squad to win promotion; incremental upgrades welcome; every buy must stay at least this season + next (reselling quickly loses money in auctions).
+- **Changed:** age limit 32 → 31 everywhere (at 32 a player has a 45% chance of retiring before next season in our prior); Best value now accepts smaller upgrades (5-season gain > 1, was 1.5). Short-term fixes = 30–31.
+
 ## 2026-11-04 — v0.11.2 (empty recruitment board)
 - **Problem:** at 20% of funds every list was empty. (1) Each line read only the top 90 by main skill — elite players whose asks look cheap but whose fees (≈ half their Value) are far above a small cap. (2) The price model learned from 15 game Values, all of shortlisted (expensive) players, so it priced nearly every listing at ~$1M — even 32-year-olds asking $10k — and cheap listings never got their real Value fetched.
 - **Changed:** per line, a second "band" search (main skill ≤ our weakest starter's +4), an age limit (≤32) on searches, 3 free-agent pages; the 15 biggest upgrades whose ask fits the cap get their real Value read every scan; the price model needs 25 Values and has a decline term from 27. New **Bid up to your cap** list: ask fits, expected fee doesn't — chance to win at the cap from the fee spread (log-normal around 0.5× Value, log-sd 1.15 from completed transfers: median 0.46, p90 ~2×).

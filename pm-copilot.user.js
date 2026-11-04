@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PM Copilot — Planetarium Manager assistant
 // @namespace    pm-copilot
-// @version      0.11.2
+// @version      0.11.3
 // @description  Opponent-aware tactics, match prep autopilot, training, transfers, finance and facilities for pmanager.org — learns from every match. Changelog: github.com/Jadax/pm-advisor
 // @author       Tushant Sharma
 // @license      MIT
@@ -23,7 +23,7 @@
 (() => {
   'use strict';
   if (window.top !== window.self) return;
-  const VERSION = '0.11.2';
+  const VERSION = '0.11.3';
   const PAGE = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
 
   /* =========================================================================
@@ -1657,8 +1657,9 @@
     const lg = (db.fixtures?.list || []).filter(f => /Lg\./i.test(f.type));
     return lg.length ? Math.max(0.1, lg.filter(f => !f.score).length / lg.length) : 0.5;
   }
-  // A buy must be likely to still be here next season (the user wants at least 1–2 seasons from anyone).
-  const MAX_BUY_AGE_ANY = 32;
+  // A buy must play this season and the next for us: buying and reselling quickly loses money in auctions, so
+  // anyone over 31 (≥25% chance of retiring before next season) is out.
+  const MAX_BUY_AGE_ANY = 31;
   // 5-season gain of a candidate over the starter he'd replace; this season counts only for what's left of it.
   const seasonGain = (cand, starter, age, left = seasonLeft()) => sum(cand.ratings.map((r, i) => (r - starter.ratings[i]) * DISCOUNT ** i * (i ? careerWeight((age || 22) + i) : left)));
 
@@ -1922,7 +1923,7 @@
     const maxAge = db.prefs.maxBuyAge ?? 29;
     const best = pick(within(caps.max).filter(e => e.c.age <= maxAge), e => e.w, 3);
     // value: most priority-weighted gain per $1M of expected cost (fee + a season of wages); a real upgrade only
-    const value = pick(within(caps.max).filter(e => e.d5 > 1.5), e => e.roi * (e.cheap ? Math.min(1.5, e.cheap) : 1), 3);
+    const value = pick(within(caps.max).filter(e => e.d5 > 1), e => e.roi * (e.cheap ? Math.min(1.5, e.cheap) : 1), 3);
     // what more money would buy: biggest upgrades above the cap, under 30, within 80% of funds
     const stretch = pick(uniq.filter(e => e.expPrice > caps.max && e.expPrice <= caps.funds * 0.8 && e.c.age <= maxAge), e => e.w, 2);
     // auctions that may still end within the cap: ask fits, expected fee doesn't — bid the cap and see
@@ -3009,7 +3010,7 @@ input.txt{flex:1;height:26px;border:1px solid var(--line);background:var(--bg);c
         <div class="xs mut" style="margin-top:6px">Every position and the free-agent list, each player rated in every slot of his line against your starter over 5 seasons, weighted by how much that slot decides matches. Cost = expected winning bid (≈ half his Value, never below the ask) + a season of wages.</div>`);
       h += sec('rbest', 'Best buys', `<div class="row sp" style="margin-bottom:6px"><span class="xs mut">Long-term upgrades, priority positions first, one per position.</span><span class="seg">${[[25, '≤25'], [29, '≤29'], [99, 'Any age']].map(([a, l]) => `<button data-maxage="${a}" class="${B.maxAge === a ? 'on' : ''}">${l}</button>`).join('')}</span></div>` + tbl(B.best) + (!B.best.length && B.stretch.length ? `<div class="xs mut" style="margin-top:6px">Real upgrades start above your cap (Worth saving for, from ≈${money(Math.min(...B.stretch.map(e => e.expPrice)))}) — a higher share of funds would cover them.</div>` : ''), { right: `≤ ${money(B.caps.max)}` });
       if (B.minNational && !/no limit/i.test(B.minNational)) h += `<div class="sec"><div class="sm" style="color:var(--warn)">Your federation now requires national players: ${esc(B.minNational)}. Check nationalities before buying.</div></div>`;
-      h += sec('rvalue', 'Best value', tbl(B.value) + '<div class="xs mut" style="margin-top:6px">Most upgrade per $1M of <b>net</b> cost — the fee minus what he still sells for in 3 seasons (young players keep their value, 30+ lose it), plus a season of wages. Free agents and short-term fixes (30–32) included; nobody likely to retire before next season — this season only counts for the rounds left.</div>', { right: 'return per $' });
+      h += sec('rvalue', 'Best value', tbl(B.value) + '<div class="xs mut" style="margin-top:6px">Most upgrade per $1M of <b>net</b> cost — the fee minus what he still sells for in 3 seasons (young players keep their value, 30+ lose it), plus a season of wages. Free agents and short-term fixes (30–31) included; nobody likely to retire before next season — this season only counts for the rounds left.</div>', { right: 'return per $' });
       if (B.bids?.length) h += sec('rbids', 'Bid up to your cap', tbl(B.bids) + `<div class="xs mut" style="margin-top:6px">Their ask fits your cap but auctions usually end higher (≈ half the Value). Bid at most ${money(B.caps.max)}: ${B.bids.map(e => `${esc(surname(e.c.name))} ~${Math.round(e.chance * 100)}%`).join(' · ')} chance to win at that price.</div>`, { right: 'chance at cap' });
       if (B.stretch.length) h += sec('rstretch', 'Worth saving for', tbl(B.stretch) + '<div class="xs mut" style="margin-top:6px">Bigger long-term upgrades above your cap (under 30).</div>', { right: `> ${money(B.caps.max)}`, open: false });
       h += sec('rslots', 'By position', `<table><tr><th>Slot</th><th>Starter</th><th>Best</th><th>Value</th></tr>${B.slots.map(s => `<tr><td>${chip(s.slot.code)}<div class="xs mut" title="How much this slot decides matches (1 = average)">×${s.imp.toFixed(1)}</div></td><td class="xs">${esc(surname(s.starter.name))}<div class="mut">${f1(s.ov.now)} → ${f1(s.ov.at26)}</div></td>${[s.best, s.value].map(e => `<td class="xs">${e ? `<a href="/ver_jogador.asp?jog_id=${esc(e.c.id)}" style="color:inherit;font-weight:600">${esc(surname(e.c.name))}</a> <span style="color:var(--good)">${sg(e.d5)}</span><div class="mut">${e.c.age}y · ≈${money(e.expPrice)}</div>` : '<span class="mut">—</span>'}</td>`).join('')}</tr>`).join('')}</table><div class="xs mut" style="margin-top:6px">Ordered by how much each position decides matches in the current model (×1 = average).</div>`, { open: false });
