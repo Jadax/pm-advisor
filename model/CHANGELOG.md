@@ -2,6 +2,13 @@
 
 Newest first. Written by the daily review (and by hand) whenever the data changes the engine.
 
+## 2026-11-04 — v0.12.0 (Match of the Season)
+- **Rules (manual §13–14, §20):** MOTS adds "almost a whole star" to every zone, Play it Cool takes as much off; 2 MOTS per season, reset after the playoffs; league + cup, not friendlies; a MOTS defeat hurts morale badly; players tire ~1% more (league MOTS 3/4/5% by age vs 2/3/4%). Our own reports don't show attitude; `prox_adv.asp` shows the opponent's MOTS used.
+- **Changed:** attitude is now ±0.9 stars on every zone (was ±8% goal rate). Season planner: every remaining league/cup fixture rated (opponent zones from their reports), gain = points with MOTS − without − 0.5 pt × P(loss with MOTS); MOTS goes to the top fixtures for the MOTS left, set on the orders page (`Team_attitude`) by the orders autopilot, and counted per season (user can correct 0/1/2).
+- **Fixed:** win/draw/loss lost the probability beyond 10 goals (heavy favourites showed 97/1/0, and MOTS looked worse vs weak sides) — wins now take the tail. Next match home/away came from the pundits' line, which doesn't always list the home side first: today's away game at Greater Tzaneen was planned as a home game; fixtures now decide (odds swapped to match).
+- **Today:** @ Greater Tzaneen (round 13) 84% → 96% with MOTS (+0.27 pts) and vs Qwa-Qwa Bears (round 18, +0.24) are the two picks; the rest are near-certain wins already.
+- **Watch:** the morale cost of a MOTS defeat (prior 0.5 pt); whether opponents' MOTS use predicts their big games.
+
 ## 2026-11-04 — v0.11.4 (ratings matched to the game's Quality)
 - **Data:** the game's Quality number for 17 players (our squad's `data-q` + Dobeš) fits Quality = 6.2 + 1.41·Σprimaries + 0.52·Σsecondaries + 0.19·Σphysicals with r = 0.999 (max error ~1 point). A secondary counts 37% of a primary, a physical 13%; our weights had 48% and 37% (physicals ~3× too heavy). Old ratings correlated 0.958 with Quality.
 - **Changed:** position weights → primaries 0.333, secondaries 0.123, physicals 0.044 (GK: 0.365 / 0.135), still summing to 1. Wrong-side penalty 14% → 10% (manual §7: "small penalty"; magnitude unmeasured).

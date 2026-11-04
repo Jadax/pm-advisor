@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PM Copilot — Planetarium Manager assistant
 // @namespace    pm-copilot
-// @version      0.11.4
+// @version      0.12.0
 // @description  Opponent-aware tactics, match prep autopilot, training, transfers, finance and facilities for pmanager.org — learns from every match. Changelog: github.com/Jadax/pm-advisor
 // @author       Tushant Sharma
 // @license      MIT
@@ -23,7 +23,7 @@
 (() => {
   'use strict';
   if (window.top !== window.self) return;
-  const VERSION = '0.11.4';
+  const VERSION = '0.12.0';
   const PAGE = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
 
   /* =========================================================================
@@ -521,7 +521,11 @@
     const ft = flatText(doc.body);
     const ex = ft.match(/distributed as follows:\s*(.+?) win:\s*(\d+)%;\s*draw:\s*(\d+)%;\s*(.+?) win:\s*(\d+)%/i);
     if (!ex) return null;
-    const home = clean(ex[1]), away = clean(ex[4]);
+    // the pundits' line doesn't always name the home side first — the fixture list decides
+    const a1 = clean(ex[1]), a2 = clean(ex[4]);
+    const fx = (db.fixtures?.list || []).find(f => !f.score && [norm(a1), norm(a2)].includes(norm(f.home)) && [norm(a1), norm(a2)].includes(norm(f.away)));
+    const flip = !!fx && norm(fx.home) === norm(a2);
+    const home = flip ? a2 : a1, away = flip ? a1 : a2;
     const t = docText(doc.body);
     const m = re => (t.match(re) || [])[1];
     for (const a of doc.querySelectorAll('a[href*="equipa="]')) {
@@ -529,10 +533,9 @@
       if (tx === norm(home) || tx === norm(away)) db.teamLinks[tx] = hrefOf(a);
     }
     const date = m(/(\d{1,2}\/\d{1,2}\/\d{4})\s*\n/);
-    const fx = (db.fixtures?.list || []).find(f => norm(f.home) === norm(home) && norm(f.away) === norm(away) && !f.score);
     db.next = {
       home, away, date,
-      odds: { home: +ex[2] / 100, draw: +ex[3] / 100, away: +ex[5] / 100 },
+      odds: { home: +ex[flip ? 5 : 2] / 100, draw: +ex[3] / 100, away: +ex[flip ? 2 : 5] / 100 },
       comp: fx?.type || clean(m(/(Rnd\.\s*\d+\s*Lg\.)/) || ''),
       weather: clean(m(/Weather Forecast\s*\n([^\n]+)/i)),
       points: { win: num(m(/Victory points\s*\n?\s*([+-]?\d+)/i)), draw: num(m(/Draw points\s*\n?\s*([+-]?\d+)/i)), loss: num(m(/Defeat points\s*\n?\s*([+-]?\d+)/i)) },
@@ -1128,20 +1131,23 @@
   function poisson(l, k) { let f = 1; for (let i = 2; i <= k; i++) f *= i; return Math.exp(-l) * l ** k / f; }
   function wdl(a, b) {
     let w = 0, d = 0, l = 0;
-    for (let i = 0; i <= 10; i++) for (let j = 0; j <= 10; j++) {
+    for (let i = 0; i <= 12; i++) for (let j = 0; j <= 12; j++) {
       const p = poisson(a, i) * poisson(b, j);
       if (i > j) w += p; else if (i === j) d += p; else l += p;
     }
-    return { w, d, l };
+    return { w: Math.max(0, 1 - d - l), d, l }; // the tail beyond 12 goals is almost all wins for the stronger side
   }
 
   function sideMult(z, s) {
     const fx = STYLE_FX[s.style] || STYLE_FX.Normal;
-    const g = (1 + 0.02 * (s.atWon || 0)) * (s.attitude === 'MOTS' ? 1.08 : s.attitude === 'PIC' ? 0.92 : 1) * (s.home ? 1.03 : 1);
+    const g = (1 + 0.02 * (s.atWon || 0)) * (s.home ? 1.03 : 1);
+    // manual §14: MOTS adds "almost a whole star" to every zone rating, Play it Cool takes as much off
+    const att = s.attitude === 'MOTS' ? MOTS_STARS : s.attitude === 'PIC' ? -MOTS_STARS : 0;
     const o = { def: {}, mid: {}, att: {}, n: z.n, gk: z.gk * fx.d * g };
-    for (const l of LANES) { o.def[l] = z.def[l] * fx.d * g; o.att[l] = z.att[l] * fx.a * g; o.mid[l] = z.mid[l] * g; }
+    for (const l of LANES) { o.def[l] = z.def[l] * fx.d * g + att; o.att[l] = z.att[l] * fx.a * g + att; o.mid[l] = z.mid[l] * g + att; }
     return o;
   }
+  const MOTS_STARS = 0.9;
 
   const PREF_W = { Normal: {}, Left: { L: 1.35 }, Right: { R: 1.35 }, Center: { C: 1.35 }, 'Attack on wings': { L: 1.2, R: 1.2 }, 'Center/Left': { C: 1.15, L: 1.15 }, 'Center/Right': { C: 1.15, R: 1.15 } };
   // Works in match-engine star units. BASE/K_* are fitted (Poisson likelihood) on real reports:
@@ -1210,6 +1216,36 @@
   const dateKey = d => { if (!d) return 0; const [dd, mm, yy] = d.split('/').map(Number); return (yy || 0) * 10000 + (mm || 0) * 100 + (dd || 0); };
 
   // Everything we know about the opponent: real ME zone ratings from their reports, quality grades, ATs used.
+  // A team's history (newest first) from the report database, and its recency-weighted ME zone stars
+  // with each match's style and home bonus undone.
+  function teamHistory(name) {
+    return Object.values(db.reports)
+      .filter(r => r.sides.some(s => norm(s.team) === norm(name)))
+      .sort((a, b) => dateKey(b.date) - dateKey(a.date) || b.id - a.id)
+      .map(r => {
+        const idx = r.sides.findIndex(s => norm(s.team) === norm(name)), s = r.sides[idx];
+        return { r, s, id: r.id, date: r.date, vs: r.sides[1 - idx].team, home: idx === 0, gf: r.score?.[idx], ga: r.score?.[1 - idx], formation: s.formation, style: s.style, passing: s.passing, stats: s.stats, zones: s.zones, bot: s.bot };
+      });
+  }
+  function reportZones(zr) {
+    const z = { def: {}, mid: {}, att: {}, n: { D: {}, M: {}, F: {} }, gk: 0 };
+    let wsum = 0;
+    zr.slice(0, 5).forEach((h, i) => {
+      const w = 0.75 ** i, fx = STYLE_FX[h.style] || STYLE_FX.Normal, hm = h.home ? 1.03 : 1;
+      wsum += w;
+      for (const l of LANES) {
+        z.def[l] = (z.def[l] || 0) + w * (h.zones.def[l] ?? 0) / fx.d / hm;
+        z.mid[l] = (z.mid[l] || 0) + w * (h.zones.mid[l] ?? 0) / hm;
+        z.att[l] = (z.att[l] || 0) + w * (h.zones.att[l] ?? 0) / fx.a / hm;
+      }
+      z.gk += w * (h.zones.gk ?? 0) / fx.d / hm;
+    });
+    for (const k of ['def', 'mid', 'att']) for (const l of LANES) z[k][l] /= wsum;
+    z.gk /= wsum;
+    return z;
+  }
+  const modeOf = arr => Object.entries(arr.reduce((m, x) => ((m[x] = (m[x] || 0) + 1), m), {})).sort((a, b) => b[1] - a[1])[0]?.[0];
+
   function opponentModel(cal, ourRefZ) {
     const name = opponentName();
     if (!name) return null;
@@ -1240,20 +1276,7 @@
     const zr = history.filter(h => h.zones);
     if (zr.length) {
       source = 'match-engine';
-      z = { def: {}, mid: {}, att: {}, n: { D: {}, M: {}, F: {} }, gk: 0 };
-      let wsum = 0;
-      zr.slice(0, 5).forEach((h, i) => {
-        const w = 0.75 ** i, fx = STYLE_FX[h.style] || STYLE_FX.Normal, hm = h.home ? 1.03 : 1;
-        wsum += w;
-        for (const l of LANES) {
-          z.def[l] = (z.def[l] || 0) + w * (h.zones.def[l] ?? 0) / fx.d / hm;
-          z.mid[l] = (z.mid[l] || 0) + w * (h.zones.mid[l] ?? 0) / hm;
-          z.att[l] = (z.att[l] || 0) + w * (h.zones.att[l] ?? 0) / fx.a / hm;
-        }
-        z.gk += w * (h.zones.gk ?? 0) / fx.d / hm;
-      });
-      for (const k of ['def', 'mid', 'att']) for (const l of LANES) z[k][l] /= wsum;
-      z.gk /= wsum;
+      z = reportZones(zr);
     } else {
       const o = db.next?.odds;
       let factor = 1;
@@ -1343,8 +1366,56 @@
     const penScore = p => (p.penalties ? denomIdx(p.penalties) * 5 : 0) + 0.5 * ((p.sk?.FIN || 0) + (p.sk?.TEC || 0));
     const pens = starters.filter(x => x.slot.line !== 'GK').sort((a, b) => penScore(b.p) - penScore(a.p))[0];
     const plan = { best, alts, opp, oppSide, attitudes, pref, prefs, current, captain, pens, home, pool, cal, total: results.length };
+    plan.mots = motsPlan(plan);
     planCache = { v: key, plan };
     return plan;
+  }
+
+  /* ---------- Match of the Season (manual §13–14, §20) ----------
+   * Two per season (reset after the playoffs), league and cup only. Worth almost a whole star on every zone,
+   * but losing with it hurts morale badly and players tire ~1% more. So each is spent on the remaining
+   * fixtures where it adds the most points; the engine counts its own uses, the user can correct the count. */
+  const MOTS_PER_SEASON = 2;
+  const MOTS_LOSS_COST = 0.5; // morale damage of a MOTS defeat, in points (a prior)
+  const MOTS_MIN_GAIN = 0.1;
+  const fixtureKey = f => `${f.home}|${f.away}`;
+  function motsSeason() {
+    const lg = (db.fixtures?.list || []).filter(f => /Lg./i.test(f.type));
+    const season = lg[0] ? fixtureKey(lg[0]) + '|' + lg[0].date : 'unknown';
+    if (!db.mots || db.mots.season !== season) db.mots = { season, base: 0, used: [] };
+    const played = new Set((db.fixtures?.list || []).filter(f => f.score).map(fixtureKey));
+    const used = db.mots.base + db.mots.used.filter(k => played.has(k)).length;
+    return { used, left: Math.max(0, MOTS_PER_SEASON - used), pending: db.mots.used.filter(k => !played.has(k)) };
+  }
+  function motsPlan(plan) {
+    if (!plan?.best || !db.fixtures?.list?.length) return null;
+    const me = norm(db.me.name || '');
+    const S = motsSeason();
+    const oppNext = db.next ? norm(norm(db.next.home) === me ? db.next.away : db.next.home) : null;
+    // the next fixture: first unplayed one against the next opponent (the pages name home/away differently)
+    const nextF = oppNext && db.fixtures.list.find(f => !f.score && [norm(f.home), norm(f.away)].includes(oppNext));
+    const nextK = nextF ? fixtureKey(nextF) : null;
+    const base = { z: plan.best.z, style: plan.best.style, passing: plan.best.passing, atWon: plan.best.ats?.won || 0, pref: plan.pref };
+    const rows = db.fixtures.list.filter(f => !f.score && /Lg.|Cup/i.test(f.type) && [norm(f.home), norm(f.away)].includes(me)).map(f => {
+      const key = fixtureKey(f), home = key === nextK ? plan.home : norm(f.home) === me, opp = norm(f.home) === me ? f.away : f.home;
+      let side = key === nextK ? plan.oppSide : null;
+      if (!side) {
+        const h = teamHistory(opp).filter(x => x.zones);
+        const z = h.length ? reportZones(h) : JSON.parse(JSON.stringify(plan.best.z)); // unknown side: an even match
+        const form = formFromString(modeOf(h.slice(0, 5).map(x => x.formation)) || '4-4-2');
+        z.n = { D: {}, M: {}, F: {} };
+        for (const line of ['D', 'M', 'F']) for (const l of LANES) z.n[line][l] = form[line][l];
+        side = { z, style: modeOf(h.slice(0, 3).map(x => x.style)) || 'Normal', passing: modeOf(h.slice(0, 3).map(x => x.passing)) || 'Short', home: !home, attitude: 'Normal', atWon: 0 };
+      }
+      const n = simulate({ ...base, home, attitude: 'Normal' }, side), m = simulate({ ...base, home, attitude: 'MOTS' }, side);
+      const cup = /cup/i.test(f.type);
+      const value = r => (cup ? 3 * (r.w + r.d / 2) : 3 * r.w + r.d); // a cup draw is a coin flip to go through
+      return { f, key, opp, home, cup, n, m, gain: value(m) - value(n) - MOTS_LOSS_COST * m.l, next: key === nextK };
+    });
+    const left = S.left - S.pending.filter(k => k !== nextK).length;
+    const ranked = rows.slice().sort((a, b) => b.gain - a.gain);
+    const picks = ranked.slice(0, Math.max(0, left)).filter(r => r.gain > MOTS_MIN_GAIN);
+    return { ...S, left, rows, picks, use: picks.some(r => r.next), nextKey: nextK };
   }
 
   function currentLineupEval(pool, oppSide, home, cal) {
@@ -2050,6 +2121,7 @@
     set('Marking', a.marking); set('RematesLonge', yn(a.longShots)); set('RematesPrimeira', yn(a.firstTime));
     set('Tackling', 'Normal');
     set('Preferred_Side', plan.pref);
+    set('Team_attitude', plan.mots?.use ? 'Match of the Season' : 'Normal');
     if (plan.captain) set('Team_Captain', plan.captain.p.name);
     if (plan.pens) set('pk1', plan.pens.p.name);
     if (typeof win.changed === 'function') win.changed();
@@ -2069,7 +2141,7 @@
     if (nextOpt && db.next) db.next.ordersUrl = '/' + nextOpt.value.replace(/^\//, '');
     return { label, isDefault: /default/i.test(label), forNext: !!opp && norm(label).includes(norm(opp)) };
   }
-  const planSignature = plan => JSON.stringify([formDetail(plan.best.f), plan.best.xi.map(x => x.p.id), plan.best.style, plan.best.passing, plan.best.ats, plan.pref]);
+  const planSignature = plan => JSON.stringify([formDetail(plan.best.f), plan.best.xi.map(x => x.p.id), plan.best.style, plan.best.passing, plan.best.ats, plan.pref, !!plan.mots?.use]);
   const matchKey = () => (db.next ? `${db.next.date}|${db.next.home}|${db.next.away}` : null);
   const prep = () => { const k = matchKey(); db.prep = db.prep || {}; return k ? (db.prep[k] = db.prep[k] || {}) : {}; };
   function logAction(kind, text, ok = true) {
@@ -2135,7 +2207,12 @@
       res = await withFrame(db.next.ordersUrl, lineupReady, async ctx => { ordersContext(ctx.doc); return run(ctx); });
     }
     p.orders = { sig, at: now(), saved: res.saved, failed: res.failed };
-    logAction('orders', `${formLabel(plan.best.f)} ${plan.best.style}/${plan.best.passing}${plan.best.ats ? '' : ' (ATs off)'} vs ${plan.opp?.name}${res.saved ? ' · saved' : ' · not saved'}`, res.xiOk);
+    // count our own MOTS: the reports don't show it, and the page's choice can still change until kick-off
+    if (res.saved && plan.mots?.nextKey && db.mots) {
+      db.mots.used = db.mots.used.filter(k => k !== plan.mots.nextKey);
+      if (plan.mots.use) db.mots.used.push(plan.mots.nextKey);
+    }
+    logAction('orders', `${formLabel(plan.best.f)} ${plan.best.style}/${plan.best.passing}${plan.best.ats ? '' : ' (ATs off)'}${plan.mots?.use ? ' · MOTS' : ''} vs ${plan.opp?.name}${res.saved ? ' · saved' : ' · not saved'}`, res.xiOk);
     return res;
   }
 
@@ -2822,13 +2899,14 @@ input.txt{flex:1;height:26px;border:1px solid var(--line);background:var(--bg);c
   }
   const mode = arr => Object.entries(arr.reduce((m, x) => ((m[x] = (m[x] || 0) + 1), m), {})).sort((a, b) => b[1] - a[1])[0]?.[0];
   function attitudeTip(plan) {
-    const n = plan.attitudes.Normal, comp = db.next?.comp || '';
-    const gain = plan.attitudes.MOTS.w - n.w;
-    if (/cup/i.test(comp)) return `Cup tie: MOTS adds ~${Math.round(gain * 100)} pts of win chance. Only 2 per season, and losing with MOTS hurts morale.`;
-    if (n.w > 0.72) return 'Clear favourite: Play it Cool keeps players fresher (and lifts morale if you win) at a small cost.';
-    if (n.w < 0.4) return 'Underdog: use MOTS only if this game decides something.';
-    return 'Normal. Save your two MOTS for title or promotion deciders.';
+    const M = plan.mots;
+    if (!M) return 'Fixtures not read yet — MOTS plan needs the season calendar.';
+    const lab = r => `${r.home ? 'vs' : '@'} ${r.opp}${r.f.date ? ' (' + r.f.date + ')' : ''}`;
+    const plan2 = M.picks.length ? `Spend on: ${M.picks.map(r => `${lab(r)} +${r.gain.toFixed(2)} pts`).join(' · ')}.` : 'No remaining fixture where MOTS clearly pays.';
+    const now = M.use ? `Using MOTS now${db.prefs.autoApply ? ' (set by the autopilot)' : ''}.` : 'Normal for this match.';
+    return `${now} Used ${M.used}/${MOTS_PER_SEASON} this season. ${plan2} Each is worth almost a star per zone; losing with it hurts morale, and players tire ~1% more.`;
   }
+
 
   /* ---------- Match ---------- */
   function prepChecklist() {
@@ -2893,7 +2971,7 @@ input.txt{flex:1;height:26px;border:1px solid var(--line);background:var(--bg);c
     const ev = prep().events;
     h += sec('events', 'Match events', ev?.list?.length ? list(ev.list.map(t => ({ t, lvl: 'good' }))) : `<div class="sm mut">${db.prefs.autoEvents ? 'Set automatically when the match is prepared.' : 'Auto events are off.'}</div>`, { right: ev ? `${ev.n} active` : '', open: false });
     const A = Object.fromEntries(Object.entries(plan.attitudes).map(([k, v]) => [k, shown(v)]));
-    h += sec('att', 'Attitude', `<table><tr><th></th><th class="n">W</th><th class="n">D</th><th class="n">L</th></tr>${[['Normal', 'Normal'], ['MOTS', 'Match of the Season'], ['PIC', 'Play it Cool']].map(([k, l]) => `<tr><td>${l}</td><td class="n">${pct(A[k].w)}</td><td class="n">${pct(A[k].d)}</td><td class="n">${pct(A[k].l)}</td></tr>`).join('')}</table><div class="xs mut" style="margin-top:6px">${attitudeTip(plan)}</div>`, { open: false });
+    h += sec('att', 'Attitude', `<table><tr><th></th><th class="n">W</th><th class="n">D</th><th class="n">L</th></tr>${[['Normal', 'Normal'], ['MOTS', 'Match of the Season'], ['PIC', 'Play it Cool']].map(([k, l]) => `<tr><td>${l}</td><td class="n">${pct(A[k].w)}</td><td class="n">${pct(A[k].d)}</td><td class="n">${pct(A[k].l)}</td></tr>`).join('')}</table><div class="xs mut" style="margin-top:6px">${esc(attitudeTip(plan))}</div><div class="row sp" style="margin-top:6px"><span class="xs mut">MOTS used this season (set if you used one yourself)</span><span class="seg">${[0, 1, 2].map(n => `<button data-motsused="${n}" class="${plan.mots?.used === n ? 'on' : ''}">${n}</button>`).join('')}</span></div>`, { open: !!plan.mots?.use, right: plan.mots ? `MOTS ${plan.mots.used}/${MOTS_PER_SEASON}` : '' });
     h += sec('alts', 'Alternatives', `<table><tr><th>Shape</th><th>Style</th><th class="n">W</th><th class="n">xG</th></tr>${plan.alts.map(x => `<tr><td><b>${formLabel(x.f)}</b> <span class="xs mut">${esc(formDetail(x.f))}</span></td><td class="xs">${x.style}/${x.passing}</td><td class="n">${pct(shown(x.r).w)}</td><td class="n">${f1(x.r.xgFor)}–${f1(x.r.xgAg)}</td></tr>`).join('')}</table>`, { right: `${plan.total} tested`, open: false });
     if (plan.current?.issues?.length) h += sec('issues', 'Saved lineup issues', list(plan.current.issues.map(t => ({ t, lvl: 'warn' }))), { open: false });
     return h;
@@ -3101,6 +3179,7 @@ input.txt{flex:1;height:26px;border:1px solid var(--line);background:var(--bg);c
     if (t === fab) return setOpen(!panel.classList.contains('open'));
     if (t.dataset.tab) { tab = t.dataset.tab; db.prefs.tab = tab; GM_setValue(KEY, JSON.stringify(db)); body.scrollTop = 0; return render(); }
     if (t.dataset.obj) { db.prefs.objective = t.dataset.obj; save(); return render(); }
+    if (t.dataset.motsused) { motsSeason(); const played = new Set((db.fixtures?.list || []).filter(f => f.score).map(fixtureKey)); db.mots.base = Math.max(0, +t.dataset.motsused - db.mots.used.filter(k => played.has(k)).length); planCache = { v: -1, plan: null }; save(); return render(); }
     if (t.dataset.buypct) { db.prefs.buyPct = +t.dataset.buypct; save(); return render(); }
     if (t.dataset.maxage) { db.prefs.maxBuyAge = +t.dataset.maxage; save(); return render(); }
     if (t.dataset.ex) {
