@@ -42,6 +42,8 @@ Single-file Tampermonkey userscript: `pm-copilot.user.js` (one IIFE) for pmanage
 - Lecture buttons disappear once a lecture is given — `parseLecturePage().available` guards double lectures.
 - `prox_adv.asp` counts run into the next formation (`×194-4-2`) — keep the lazy regex.
 - Report formation labels ("5-2-3") don't match ours — compare starting XI ids, not labels.
+- No foreign-player limit in lineups (checked 2026-11-04); `parseAcademyPage().minNational` watches the federation's "Minimum Number of National Players" in case a referendum adds one.
+- Best value ranks on net cost (fee − discounted `resaleShare` after `RESALE_YEARS` + a season of wages); Best buys respect `prefs.maxBuyAge` (default 29).
 - A listing's "Ask. Price" is the auction floor, not the cost — always budget on expected cost (`AUCTION_RATIO` × Value, never below the ask).
 
 ## Offline tools (optional, for Claude's deeper analysis)

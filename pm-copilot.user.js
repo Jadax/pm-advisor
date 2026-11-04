@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PM Copilot — Planetarium Manager assistant
 // @namespace    pm-copilot
-// @version      0.9.0
+// @version      0.10.0
 // @description  Opponent-aware tactics, match prep autopilot, training, transfers, finance and facilities for pmanager.org — learns from every match. Changelog: github.com/Jadax/pm-advisor
 // @author       Tushant Sharma
 // @license      MIT
@@ -23,7 +23,7 @@
 (() => {
   'use strict';
   if (window.top !== window.self) return;
-  const VERSION = '0.9.0';
+  const VERSION = '0.10.0';
   const PAGE = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
 
   /* =========================================================================
@@ -403,6 +403,8 @@
       weekly: m(/Current weekly cost\s*\$?\s*([\d.,]+)/i),
       promoted: m(/Promoted Players\s+(\d+)/i),
       limit: m(/Promotions Limit\s+(\d+)\s*players/i) || m(/Promotions Limit\s+\d+\s*\/\s*(\d+)/i),
+      // federations can add country rules by referendum (manual §25); "No Limits" today
+      minNational: clean((t.match(/Minimum Number of National Players\s+([^\n]+)/i) || [])[1]) || null,
       branchCost: m(/Building Cost\s*\$?\s*([\d.,]+)/i),
       newSpeciality: m(/New Speciality\s*\$?\s*([\d.,]+)/i),
       improvements: m(/Academy Improvements\s+(\d+)/i),
@@ -1708,6 +1710,10 @@
   const SEARCH_BASE = { nome: '', pos: '0', lado: '-1', idd_op: '<', idd: 'Any', temp_op: '<', temp: 'Any', expe_op: '>=', expe: 'Any', con_op: '<', con: 'Any', pro_op: '>', pro: 'Any', vel_op: '>', vel: 'Any', forma_op: '>', forma: 'Any', cab_op: '>', cab: 'Any', ord_op: '<=', ord: 'Any', cul_op: '>', cul: 'Any', pre_op: '<=', pre: 'Any', forca_op: '>', forca: 'Any', lesionado: 'No', prog_op: '>', prog: 'Any', tack_op: '>', tack: 'Any', internacional: 'Any', passe_op: '>', passe: 'Any', pais: '-1', rem_op: '>', rem: 'Any', tec_op: '>', tec: 'Any', jmaos_op: '>', jmaos: 'Any', saidas_op: '>', saidas: 'Any', reflexos_op: '>', reflexos: 'Any', agilidade_op: '>', agilidade: 'Any', qual_op: '>', qual: 'Any', talento: '', nacional: '-1', B1: 'Pesquisar', field: '17', pid: '1', sort: '0', pv: '1' };
   const searchUrl = o => '/procurar.asp?action=proc_jog&' + new URLSearchParams({ ...SEARCH_BASE, ...o }).toString();
   const AUCTION_RATIO = 0.5; // sale fee / player Value, from completed transfers (ttransfer.asp)
+  // Share of today's price a player still fetches when sold at a given age (growth to 26, decline from 27,
+  // retirement from 30). A prior until the market history says otherwise.
+  const RESALE_YEARS = 3;
+  const resaleShare = age => (age <= 24 ? 1 : age <= 26 ? 0.85 : age <= 28 ? 0.6 : age <= 30 ? 0.35 : age <= 32 ? 0.15 : 0);
   const SCAN_POS = { GK: 'GR', D: 'D', M: 'M', F: 'A' };
   const SCAN_PAGES = 3; // 30 per page
   // Search-form skill filters and sort fields for each line's two main skills; free-list sort actions.
@@ -1839,7 +1845,9 @@
       // (median 0.46, ~0.5–0.66 under $750k). Free agents cost a 12-week signing fee instead.
       const worth = gameValue || (fair?.byValue ? fairP : 0) || 0;
       const expPrice = c.free ? 12 * (c.wage || 0) : Math.max(c.price || 0, AUCTION_RATIO * worth);
-      const cost = expPrice + (c.wage || 0) * 11; // + a season of wages
+      // what he still sells for after 3 seasons: young players keep their value, 30+ drain to nothing
+      const resale = c.free ? 0 : expPrice * resaleShare((c.age || 22) + RESALE_YEARS);
+      const cost = expPrice - DISCOUNT ** RESALE_YEARS * resale + (c.wage || 0) * 11; // net of resale, + a season of wages
       for (const o of ours) {
         if (o.x.slot.line !== c.line) continue;
         const v = valuePath(c, o.x.slot, plan);
@@ -1865,17 +1873,19 @@
       }
       return out;
     };
-    const best = pick(within(caps.max), e => e.w, 3);
+    // long-term upgrades only: an old player is a stopgap, and shows up under Best value if he's cheap enough
+    const maxAge = db.prefs.maxBuyAge ?? 29;
+    const best = pick(within(caps.max).filter(e => e.c.age <= maxAge), e => e.w, 3);
     // value: most priority-weighted gain per $1M of expected cost (fee + a season of wages); a real upgrade only
     const value = pick(within(caps.max).filter(e => e.d5 > 1.5), e => e.roi * (e.cheap ? Math.min(1.5, e.cheap) : 1), 3);
     // what more money would buy: biggest upgrades above the cap, under 30, within 80% of funds
-    const stretch = pick(uniq.filter(e => e.expPrice > caps.max && e.expPrice <= caps.funds * 0.8 && e.c.age < 30), e => e.w, 2);
+    const stretch = pick(uniq.filter(e => e.expPrice > caps.max && e.expPrice <= caps.funds * 0.8 && e.c.age <= maxAge), e => e.w, 2);
     const slots = ours.map(o => {
       const forSlot = evals.filter(e => e.slot === o.x.slot && e.d5 > 0.5 && e.wageOk && e.expPrice <= caps.max);
-      const one = key => forSlot.slice().sort((a, b) => key(b) - key(a))[0] || null;
-      return { slot: o.x.slot, starter: o.x.p, ov: o.v, imp: impact.get(o.x.slot) || 1, best: one(e => e.w), value: one(e => e.roi) };
+      const one = (key, ok = () => true) => forSlot.filter(ok).sort((a, b) => key(b) - key(a))[0] || null;
+      return { slot: o.x.slot, starter: o.x.p, ov: o.v, imp: impact.get(o.x.slot) || 1, best: one(e => e.w, e => e.c.age <= maxAge), value: one(e => e.roi) };
     }).sort((a, b) => b.imp - a.imp);
-    return { caps, fair, best, value, stretch, slots, n: cands.length, scannedAt: db.scan?.at };
+    return { caps, fair, best, value, stretch, slots, maxAge, minNational: db.academy?.minNational, n: cands.length, scannedAt: db.scan?.at };
   }
 
   // The game's own Value for the shortlist (player page), to show how far under value a price is.
@@ -2838,14 +2848,15 @@ input.txt{flex:1;height:26px;border:1px solid var(--line);background:var(--bg);c
     if (B) {
       const sg = v => `${v >= 0 ? '+' : ''}${f1(v)}`;
       const money = v => (v >= 1e6 ? `$${(v / 1e6).toFixed(2)}M` : `$${Math.round(v / 1e3)}k`);
-      const tag = e => [e.c.free ? chip('free agent', 'g') : '', e.c.age >= 31 ? chip('short-term', 'w') : '', e.cheap && e.cheap >= 1.4 ? chip('game undervalues him', 'g') : '', !e.c.free && !e.value ? chip('value unknown', 'w') : ''].join('');
+      const tag = e => [e.c.free ? chip('free agent', 'g') : '', e.c.age >= 30 ? chip('short-term', 'w') : '', e.cheap && e.cheap >= 1.4 ? chip('game undervalues him', 'g') : '', !e.c.free && !e.value ? chip('value unknown', 'w') : ''].join('');
       const row = e => `<tr title="${esc(`vs ${e.vs.name}: now ${f1(e.ov.now)}, at 26 ${f1(e.ov.at26)}`)}"><td><a href="/ver_jogador.asp?jog_id=${esc(e.c.id)}" style="color:inherit;font-weight:600">${esc(e.c.name)}</a><div class="xs mut">${e.c.age} · ${esc(e.c.line)}${esc(e.c.sides || '')} · ${esc(e.c.quality || '?')}/${esc(e.c.potential || '?')}${e.c.talent ? ' · ' + esc(e.c.talent) : ''}${e.c.deadline ? ' · ends ' + esc(e.c.deadline.slice(0, 8)) : ''}</div>${tag(e) ? `<div style="margin-top:2px">${tag(e)}</div>` : ''}</td><td>${chip(e.slot.code)}<div class="xs mut">${esc(surname(e.vs.name))}</div></td><td class="n"><b style="color:var(--good)">${sg(e.d5)}</b><div class="xs mut">now ${sg(e.dNow)}</div></td><td class="n" title="Expected winning bid: the ask (an auction floor) or about half his Value — what completed transfers typically went for. Free agents: 12-week signing fee.">≈${money(e.expPrice)}<div class="xs mut">${e.c.free ? 'signing fee' : `ask ${money(e.c.price || 0)}${e.value ? ` · value ${money(e.value)}` : ''}`}${e.c.wage ? ` · ${money(e.c.wage)}/wk` : ''}</div></td></tr>`;
       const tbl = arr => (arr.length ? `<table><tr><th>Player</th><th>As</th><th class="n">5 seasons</th><th class="n">Expect</th></tr>${arr.map(row).join('')}</table>` : '<div class="sm mut">Nothing that improves your XI at this price yet.</div>');
       h += sec('recruit', 'Recruitment', `<div class="row sp wr"><span class="sm">Funds <b>${money(B.caps.funds)}</b> · up to <b>${money(B.caps.max)}</b> per player</span><span class="seg">${[0.2, 0.35, 0.5].map(p => `<button data-buypct="${p}" class="${Math.abs(B.caps.pct - p) < 0.01 ? 'on' : ''}">${Math.round(p * 100)}%</button>`).join('')}</span></div>
         <div class="row" style="margin-top:6px"><button class="btn p" data-act="scan" ${busy ? 'disabled' : ''}>${B.scannedAt ? 'Rescan market' : 'Scan market'}</button><span class="xs mut">${B.n} live listings${B.scannedAt ? ' · ' + ago(B.scannedAt) : ''}</span></div>
         <div class="xs mut" style="margin-top:6px">Every position and the free-agent list, each player rated in every slot of his line against your starter over 5 seasons, weighted by how much that slot decides matches. Cost = expected winning bid (≈ half his Value, never below the ask) + a season of wages.</div>`);
-      h += sec('rbest', 'Best buys', tbl(B.best) + '<div class="xs mut" style="margin-top:6px">Biggest upgrades you can afford, priority positions first — one per position.</div>', { right: `≤ ${money(B.caps.max)}` });
-      h += sec('rvalue', 'Best value', tbl(B.value) + '<div class="xs mut" style="margin-top:6px">Most upgrade per $1M (including free agents and short-term fixes).</div>', { right: 'return per $' });
+      h += sec('rbest', 'Best buys', `<div class="row sp" style="margin-bottom:6px"><span class="xs mut">Long-term upgrades, priority positions first, one per position.</span><span class="seg">${[[25, '≤25'], [29, '≤29'], [99, 'Any age']].map(([a, l]) => `<button data-maxage="${a}" class="${B.maxAge === a ? 'on' : ''}">${l}</button>`).join('')}</span></div>` + tbl(B.best), { right: `≤ ${money(B.caps.max)}` });
+      if (B.minNational && !/no limit/i.test(B.minNational)) h += `<div class="sec"><div class="sm" style="color:var(--warn)">Your federation now requires national players: ${esc(B.minNational)}. Check nationalities before buying.</div></div>`;
+      h += sec('rvalue', 'Best value', tbl(B.value) + '<div class="xs mut" style="margin-top:6px">Most upgrade per $1M of <b>net</b> cost — the fee minus what he still sells for in 3 seasons (young players keep their value, 30+ lose it), plus a season of wages. Free agents and short-term fixes included.</div>', { right: 'return per $' });
       if (B.stretch.length) h += sec('rstretch', 'Worth saving for', tbl(B.stretch) + '<div class="xs mut" style="margin-top:6px">Bigger long-term upgrades above your cap (under 30).</div>', { right: `> ${money(B.caps.max)}`, open: false });
       h += sec('rslots', 'By position', `<table><tr><th>Slot</th><th>Starter</th><th>Best</th><th>Value</th></tr>${B.slots.map(s => `<tr><td>${chip(s.slot.code)}<div class="xs mut" title="How much this slot decides matches (1 = average)">×${s.imp.toFixed(1)}</div></td><td class="xs">${esc(surname(s.starter.name))}<div class="mut">${f1(s.ov.now)} → ${f1(s.ov.at26)}</div></td>${[s.best, s.value].map(e => `<td class="xs">${e ? `<a href="/ver_jogador.asp?jog_id=${esc(e.c.id)}" style="color:inherit;font-weight:600">${esc(surname(e.c.name))}</a> <span style="color:var(--good)">${sg(e.d5)}</span><div class="mut">${e.c.age}y · ≈${money(e.expPrice)}</div>` : '<span class="mut">—</span>'}</td>`).join('')}</tr>`).join('')}</table><div class="xs mut" style="margin-top:6px">Ordered by how much each position decides matches in the current model (×1 = average).</div>`, { open: false });
     }
@@ -2932,6 +2943,7 @@ input.txt{flex:1;height:26px;border:1px solid var(--line);background:var(--bg);c
     if (t.dataset.tab) { tab = t.dataset.tab; db.prefs.tab = tab; GM_setValue(KEY, JSON.stringify(db)); body.scrollTop = 0; return render(); }
     if (t.dataset.obj) { db.prefs.objective = t.dataset.obj; save(); return render(); }
     if (t.dataset.buypct) { db.prefs.buyPct = +t.dataset.buypct; save(); return render(); }
+    if (t.dataset.maxage) { db.prefs.maxBuyAge = +t.dataset.maxage; save(); return render(); }
     if (t.dataset.ex) {
       const ex = new Set(db.prefs.excluded);
       if (ex.has(t.dataset.ex)) ex.delete(t.dataset.ex); else ex.add(t.dataset.ex);

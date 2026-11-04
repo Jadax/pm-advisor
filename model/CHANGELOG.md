@@ -2,6 +2,11 @@
 
 Newest first. Written by the daily review (and by hand) whenever the data changes the engine.
 
+## 2026-11-04 — v0.10.0 (age & resale)
+- **Foreign players:** no starting-XI limit — the manual has none (the "Foreign Managers" rule is about which countries a manager may take a second team in), the Academy page shows "Minimum Number of National Players: No Limits", and the current XI is mostly non-national with no warning. Federations may add country rules by referendum later, so the script now reads that field and warns if it changes.
+- **Changed:** recruitment ranks Best value on **net** cost = expected fee − discounted resale after 3 seasons (share by age at sale: ≤24 100%, 25–26 85%, 27–28 60%, 29–30 35%, 31–32 15%, 33+ 0) + a season of wages. Best buys capped at age 29 by default (switch ≤25 / ≤29 / any); older players appear only as labelled short-term fixes under Best value.
+- **Watch:** replace the resale prior with real sale prices by age from transfer history.
+
 ## 2026-11-04 — v0.9.0 (training history)
 - **Tracking:** every training session's exact gain per player (deduped by player + session date, with skill level, age, potential and the staff factor that applied) plus a daily skill snapshot — kept in the browser (`db.history`), up to 300 sessions / 180 days per player.
 - **Changed:** projections use each player's own measured rate (blended with his grade's rate, prior = 5 sessions) and our real training conditions: share of a full session = staff level on the staff skill, 75% otherwise (84% today). Market players are projected with their grade's calibrated rate × the same factor, so buys and our squad are judged on the same training. SESSIONS = 20 full sessions/season (18 league + half-strength cups), multiplied by that factor.
