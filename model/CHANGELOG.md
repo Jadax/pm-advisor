@@ -2,6 +2,12 @@
 
 Newest first. Written by the daily review (and by hand) whenever the data changes the engine.
 
+## 2026-11-04 — v0.11.4 (ratings matched to the game's Quality)
+- **Data:** the game's Quality number for 17 players (our squad's `data-q` + Dobeš) fits Quality = 6.2 + 1.41·Σprimaries + 0.52·Σsecondaries + 0.19·Σphysicals with r = 0.999 (max error ~1 point). A secondary counts 37% of a primary, a physical 13%; our weights had 48% and 37% (physicals ~3× too heavy). Old ratings correlated 0.958 with Quality.
+- **Changed:** position weights → primaries 0.333, secondaries 0.123, physicals 0.044 (GK: 0.365 / 0.135), still summing to 1. Wrong-side penalty 14% → 10% (manual §7: "small penalty"; magnitude unmeasured).
+- **Checked (user question):** Dobeš (28, F RLC, 19/19, Hea 9, Pos 5) vs Zottelin (22, F L only, 20/20, Hea 1, Pos 3): same footing 14.95 vs 14.3 (game Quality 70 vs 67); at RF Zottelin is out of side → 12.9. We have no right-sided forward, so one of the left-footers always plays RF.
+- **Watch:** wrong-side penalty size; professionalism's effect on 27–31 decline (Dobeš: Very Bad).
+
 ## 2026-11-04 — v0.11.3 (promotion push)
 - **Goal (user):** upgrade a weak squad to win promotion; incremental upgrades welcome; every buy must stay at least this season + next (reselling quickly loses money in auctions).
 - **Changed:** age limit 32 → 31 everywhere (at 32 a player has a 45% chance of retiring before next season in our prior); Best value now accepts smaller upgrades (5-season gain > 1, was 1.5). Short-term fixes = 30–31.

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PM Copilot — Planetarium Manager assistant
 // @namespace    pm-copilot
-// @version      0.11.3
+// @version      0.11.4
 // @description  Opponent-aware tactics, match prep autopilot, training, transfers, finance and facilities for pmanager.org — learns from every match. Changelog: github.com/Jadax/pm-advisor
 // @author       Tushant Sharma
 // @license      MIT
@@ -23,7 +23,7 @@
 (() => {
   'use strict';
   if (window.top !== window.self) return;
-  const VERSION = '0.11.3';
+  const VERSION = '0.11.4';
   const PAGE = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
 
   /* =========================================================================
@@ -119,12 +119,13 @@
    * ======================================================================= */
   const SKILLS = ['HAN', 'CRO', 'REF', 'AGI', 'TCK', 'HEA', 'PAS', 'POS', 'FIN', 'TEC', 'SPE', 'STR'];
   const SKILL_NAME = { HAN: 'Handling', CRO: 'Out of Area', REF: 'Reflexes', AGI: 'Agility', TCK: 'Tackling', HEA: 'Heading', PAS: 'Passing', POS: 'Positioning', FIN: 'Finishing', TEC: 'Technique', SPE: 'Speed', STR: 'Strength' };
-  // Main attributes weigh double the secondary ones; physicals count a little for outfielders.
+  // The game's own Quality number = 6.2 + 1.41·Σprimaries + 0.52·Σsecondaries + 0.19·Σphysicals (fit on our
+  // squad, r = 0.999): a secondary counts 37% of a primary, a physical 13%. Weights sum to 1 (0–20 scale).
   const ROLE_W = {
-    GK: { HAN: 0.3, CRO: 0.3, REF: 0.2, AGI: 0.2 },
-    D: { TCK: 0.27, HEA: 0.27, PAS: 0.13, POS: 0.13, SPE: 0.1, STR: 0.1 },
-    M: { PAS: 0.27, POS: 0.27, TCK: 0.13, TEC: 0.13, SPE: 0.1, STR: 0.1 },
-    F: { FIN: 0.27, TEC: 0.27, HEA: 0.13, POS: 0.13, SPE: 0.1, STR: 0.1 },
+    GK: { HAN: 0.365, CRO: 0.365, REF: 0.135, AGI: 0.135 },
+    D: { TCK: 0.333, HEA: 0.333, PAS: 0.123, POS: 0.123, SPE: 0.044, STR: 0.044 },
+    M: { PAS: 0.333, POS: 0.333, TCK: 0.123, TEC: 0.123, SPE: 0.044, STR: 0.044 },
+    F: { FIN: 0.333, TEC: 0.333, HEA: 0.123, POS: 0.123, SPE: 0.044, STR: 0.044 },
   };
   const LINE_ORDER = { GK: 0, D: 1, M: 2, F: 3 };
   const LANES = ['L', 'C', 'R'];
@@ -947,7 +948,8 @@
       if (p.line === 'GK' || slot.line === 'GK') f = 0.25;
       else f = Math.abs(LINE_ORDER[p.line] - LINE_ORDER[slot.line]) === 1 ? 0.78 : 0.55;
     }
-    if (slot.line !== 'GK' && p.sides && !p.sides.includes(slot.lane)) f *= 0.86;
+    // manual §7: a centre on a wing, or a left/right player out of side, gets a "small penalty"
+    if (slot.line !== 'GK' && p.sides && !p.sides.includes(slot.lane)) f *= 0.9;
     return f;
   }
   const fitFactor = fit => (!isFinite(fit) ? 1 : fit >= 90 ? 1 : fit >= 80 ? 0.97 : fit >= 50 ? 0.88 : 0.75);
@@ -2223,7 +2225,7 @@
   function specialityPlan(fin) {
     const ac = db.academy;
     if (!ac?.quality || /none/i.test(ac.quality)) return null;
-    const MAIN = 0.27;
+    const MAIN = ROLE_W.D.TCK;
     const use = k => sum(Object.entries(YOUTH_LINES).map(([l, s]) => s * (ROLE_W[l][k] || 0))) / MAIN;
     // main-skill points gained per youth: spec skill averages 15 (vs ~6, physicals ~8), minus the 9–10s lost elsewhere
     const opts = SKILLS.map(k => ({ k, name: SKILL_NAME[k], id: SPEC_ID[k], use: use(k), pts: (15 - (k === 'SPE' || k === 'STR' ? 8 : 6)) * use(k) - 0.9 }))
