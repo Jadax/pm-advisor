@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PM Copilot — Planetarium Manager assistant
 // @namespace    pm-copilot
-// @version      0.11.0
+// @version      0.11.1
 // @description  Opponent-aware tactics, match prep autopilot, training, transfers, finance and facilities for pmanager.org — learns from every match. Changelog: github.com/Jadax/pm-advisor
 // @author       Tushant Sharma
 // @license      MIT
@@ -23,7 +23,7 @@
 (() => {
   'use strict';
   if (window.top !== window.self) return;
-  const VERSION = '0.11.0';
+  const VERSION = '0.11.1';
   const PAGE = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
 
   /* =========================================================================
@@ -1649,10 +1649,18 @@
     return { now: ratings[0], at26, ratings: ratings.slice(0, HORIZON + 1) };
   }
   const discounted = rs => sum(rs.map((r, i) => r * DISCOUNT ** i));
-  // Players decide to retire from 30 (manual §7) — a future season only counts if he's still likely playing.
-  const careerWeight = age => (age < 30 ? 1 : age < 32 ? 0.85 : age < 35 ? 0.6 : 0);
-  // 5-season gain of a candidate over the starter he'd replace; this season always counts.
-  const seasonGain = (cand, starter, age) => sum(cand.ratings.map((r, i) => (r - starter.ratings[i]) * DISCOUNT ** i * (i ? careerWeight((age || 22) + i) : 1)));
+  // Chance he is still playing at that age: retirement decisions start at 30 (manual §7) and, with skill
+  // losses after every training past 31 (manual §8), few last beyond 34.
+  const careerWeight = age => (age < 30 ? 1 : age < 32 ? 0.9 : age < 33 ? 0.75 : age < 34 ? 0.55 : age < 35 ? 0.3 : 0);
+  // Share of this season still to play: unplayed league rounds of ours.
+  function seasonLeft() {
+    const lg = (db.fixtures?.list || []).filter(f => /Lg\./i.test(f.type));
+    return lg.length ? Math.max(0.1, lg.filter(f => !f.score).length / lg.length) : 0.5;
+  }
+  // A buy must be likely to still be here next season (the user wants at least 1–2 seasons from anyone).
+  const MAX_BUY_AGE_ANY = 32;
+  // 5-season gain of a candidate over the starter he'd replace; this season counts only for what's left of it.
+  const seasonGain = (cand, starter, age, left = seasonLeft()) => sum(cand.ratings.map((r, i) => (r - starter.ratings[i]) * DISCOUNT ** i * (i ? careerWeight((age || 22) + i) : left)));
 
   // Rank candidates (transfer list, search results) against the starter each would replace.
   function rankCandidates(cands, plan) {
@@ -1672,7 +1680,7 @@
         if (!best || d5 > best.d5) best = { slot: o.x.slot, vs: o.x.p, v, ov: o.v, d5, dNow: v.now - o.v.now, d26: v.at26 - o.v.at26 };
       }
       const price = c.price || 0;
-      const verdict = best.dNow > 0.3 && best.d5 > 0.5 ? 'buy' : best.d26 > 0.5 && best.d5 > -1 ? 'develop' : 'skip';
+      const verdict = c.age > MAX_BUY_AGE_ANY ? 'skip' : best.dNow > 0.3 && best.d5 > 0.5 ? 'buy' : best.d26 > 0.5 && best.d5 > -1 ? 'develop' : 'skip';
       const afford = !isFinite(fin.spendable) || price <= fin.spendable;
       const wageOk = !roof || !c.wage || bill + c.wage <= roof;
       return { c, ...best, verdict, afford, wageOk, perMillion: price > 0 ? best.d5 / (price / 1e6) : null };
@@ -1883,7 +1891,7 @@
     for (const e of evals) { e.imp = impact.get(e.slot) || 1; e.w = e.d5 * e.imp; e.roi = e.cost > 0 ? e.w / (e.cost / 1e6) : e.w * 10; }
     const bestPer = new Map();
     for (const e of evals) if (!bestPer.has(e.c.id) || e.w > bestPer.get(e.c.id).w) bestPer.set(e.c.id, e);
-    const uniq = [...bestPer.values()].filter(e => e.d5 > 0.5 && e.wageOk);
+    const uniq = [...bestPer.values()].filter(e => e.d5 > 0.5 && e.wageOk && e.c.age <= MAX_BUY_AGE_ANY);
     const within = cap => uniq.filter(e => e.expPrice <= cap);
     // the cream only: highest first, one per position, nobody twice
     const taken = new Set();
@@ -1904,7 +1912,7 @@
     // what more money would buy: biggest upgrades above the cap, under 30, within 80% of funds
     const stretch = pick(uniq.filter(e => e.expPrice > caps.max && e.expPrice <= caps.funds * 0.8 && e.c.age <= maxAge), e => e.w, 2);
     const slots = ours.map(o => {
-      const forSlot = evals.filter(e => e.slot === o.x.slot && e.d5 > 0.5 && e.wageOk && e.expPrice <= caps.max);
+      const forSlot = evals.filter(e => e.slot === o.x.slot && e.d5 > 0.5 && e.wageOk && e.c.age <= MAX_BUY_AGE_ANY && e.expPrice <= caps.max);
       const one = (key, ok = () => true) => forSlot.filter(ok).sort((a, b) => key(b) - key(a))[0] || null;
       return { slot: o.x.slot, starter: o.x.p, ov: o.v, imp: impact.get(o.x.slot) || 1, best: one(e => e.w, e => e.c.age <= maxAge), value: one(e => e.roi) };
     }).sort((a, b) => b.imp - a.imp);
@@ -2981,7 +2989,7 @@ input.txt{flex:1;height:26px;border:1px solid var(--line);background:var(--bg);c
         <div class="xs mut" style="margin-top:6px">Every position and the free-agent list, each player rated in every slot of his line against your starter over 5 seasons, weighted by how much that slot decides matches. Cost = expected winning bid (≈ half his Value, never below the ask) + a season of wages.</div>`);
       h += sec('rbest', 'Best buys', `<div class="row sp" style="margin-bottom:6px"><span class="xs mut">Long-term upgrades, priority positions first, one per position.</span><span class="seg">${[[25, '≤25'], [29, '≤29'], [99, 'Any age']].map(([a, l]) => `<button data-maxage="${a}" class="${B.maxAge === a ? 'on' : ''}">${l}</button>`).join('')}</span></div>` + tbl(B.best), { right: `≤ ${money(B.caps.max)}` });
       if (B.minNational && !/no limit/i.test(B.minNational)) h += `<div class="sec"><div class="sm" style="color:var(--warn)">Your federation now requires national players: ${esc(B.minNational)}. Check nationalities before buying.</div></div>`;
-      h += sec('rvalue', 'Best value', tbl(B.value) + '<div class="xs mut" style="margin-top:6px">Most upgrade per $1M of <b>net</b> cost — the fee minus what he still sells for in 3 seasons (young players keep their value, 30+ lose it), plus a season of wages. Free agents and short-term fixes included.</div>', { right: 'return per $' });
+      h += sec('rvalue', 'Best value', tbl(B.value) + '<div class="xs mut" style="margin-top:6px">Most upgrade per $1M of <b>net</b> cost — the fee minus what he still sells for in 3 seasons (young players keep their value, 30+ lose it), plus a season of wages. Free agents and short-term fixes (30–32) included; nobody likely to retire before next season — this season only counts for the rounds left.</div>', { right: 'return per $' });
       if (B.stretch.length) h += sec('rstretch', 'Worth saving for', tbl(B.stretch) + '<div class="xs mut" style="margin-top:6px">Bigger long-term upgrades above your cap (under 30).</div>', { right: `> ${money(B.caps.max)}`, open: false });
       h += sec('rslots', 'By position', `<table><tr><th>Slot</th><th>Starter</th><th>Best</th><th>Value</th></tr>${B.slots.map(s => `<tr><td>${chip(s.slot.code)}<div class="xs mut" title="How much this slot decides matches (1 = average)">×${s.imp.toFixed(1)}</div></td><td class="xs">${esc(surname(s.starter.name))}<div class="mut">${f1(s.ov.now)} → ${f1(s.ov.at26)}</div></td>${[s.best, s.value].map(e => `<td class="xs">${e ? `<a href="/ver_jogador.asp?jog_id=${esc(e.c.id)}" style="color:inherit;font-weight:600">${esc(surname(e.c.name))}</a> <span style="color:var(--good)">${sg(e.d5)}</span><div class="mut">${e.c.age}y · ≈${money(e.expPrice)}</div>` : '<span class="mut">—</span>'}</td>`).join('')}</tr>`).join('')}</table><div class="xs mut" style="margin-top:6px">Ordered by how much each position decides matches in the current model (×1 = average).</div>`, { open: false });
     }

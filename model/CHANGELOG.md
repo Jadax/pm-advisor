@@ -2,6 +2,10 @@
 
 Newest first. Written by the daily review (and by hand) whenever the data changes the engine.
 
+## 2026-11-04 — v0.11.1 (no retiring veterans)
+- **Problem:** Best value was full of 36–37-year-old free agents. Their only gain is this season (they retire, and past 31 they lose skill after every training — manual §7–8), but this season counted in full against a ~$12k signing fee.
+- **Changed:** this season counts only for our unplayed league rounds; chance of still playing 30–31 90%, 32 75%, 33 55%, 34 30%, 35+ 0; nobody over 32 on any list or market badge (must likely be here next season). Short-term fixes = 30–32.
+
 ## 2026-11-04 — v0.11.0 (academy speciality & youth team)
 - **Rules (manual §8–10, academy page):** a speciality costs $1,000,000 once (page) + upkeep ≈ 2× the academy's weekly cost (manual: +€60k vs €30k for World Class → ≈ $30k/week here). Promoted youth get 10–20 in that skill; other non-physical skills cap at 8 (10 without); one change per season. Youth team = academy 17–18s, no matches, full training every league round; main-squad non-players get a penalty (nothing after cups/friendlies); B team max 16, reduced training, none from 22. No PM-specific community advice found (forums/Reddit/web).
 - **Changed:** speciality value = Σ over random youth positions of the skill's weight (Positioning 4.6 main-skill pts/youth > Tackling = Passing 3.8 > Heading 3.1; GK skills lowest) × 10 promotions × 50% kept × $40k/pt ≈ $0.93M/season vs $0.59M cost (upkeep + fee over 5 seasons). Autopilot sets it once a season, before promotions, only with funds ≥ fee + a season of upkeep + buffer (now: need $1.87M, have $1.60M → saving). Youth-eligible players outside the XI go back to the youth team (keeps 14 players and a spare keeper — Osman stays for now as the only backup GK).

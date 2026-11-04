@@ -45,7 +45,7 @@ Single-file Tampermonkey userscript: `pm-copilot.user.js` (one IIFE) for pmanage
 - Squad tiers: row `data-sq` 0 main / 1 B / 3 youth (`p.tier`); youth players can't play — `squadPool` drops them. Youth train at 100% every league round without playing; B team gets reduced training and none from 22 (manual §8–9).
 - Academy speciality: one-off fee on the page (`New Speciality`, $1M) + upkeep ≈ 2× academy weekly (manual ratio); spec skill 10–20, other non-physicals capped at 8; promoted positions random.
 - No foreign-player limit in lineups (checked 2026-11-04); `parseAcademyPage().minNational` watches the federation's "Minimum Number of National Players" in case a referendum adds one.
-- Best value ranks on net cost (fee − discounted `resaleShare` after `RESALE_YEARS` + a season of wages); Best buys respect `prefs.maxBuyAge` (default 29).
+- Best value ranks on net cost (fee − discounted `resaleShare` after `RESALE_YEARS` + a season of wages); Best buys respect `prefs.maxBuyAge` (default 29). Nobody over `MAX_BUY_AGE_ANY` (32) anywhere; `seasonGain` weights this season by `seasonLeft()` (unplayed league rounds) — otherwise near-free 36-year-olds top Best value.
 - A listing's "Ask. Price" is the auction floor, not the cost — always budget on expected cost (`AUCTION_RATIO` × Value, never below the ask).
 
 ## Offline tools (optional, for Claude's deeper analysis)
