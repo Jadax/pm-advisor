@@ -2,6 +2,12 @@
 
 Newest first. Written by the daily review (and by hand) whenever the data changes the engine.
 
+## 2026-11-05 — no change (v0.12.0 stays)
+- **Data:** no fresh harvest (browser pane closed); local data unchanged since 01/11 — 99 reports, 2 decisions, 1 graded match (model Brier 0.001 vs pundits 0.639).
+- **Refit:** identical (robust BASE 6, K_BEAT 1.5, K_GK 1, K_MID 8; −253.6 vs −455.2 constant-rate).
+- **Not changed:** no new evidence; weather still <30 games per condition, advanced tactics confounded by team strength, calibration can't be judged on 1 graded match. The in-browser learner keeps refitting on the user's side.
+- **Watch:** open the browser pane signed in to pmanager.org before the next run so the Cup QF, the Greater Tzaneen MOTS game and the new rounds can be harvested and graded.
+
 ## 2026-11-04 — v0.12.0 (Match of the Season)
 - **Rules (manual §13–14, §20):** MOTS adds "almost a whole star" to every zone, Play it Cool takes as much off; 2 MOTS per season, reset after the playoffs; league + cup, not friendlies; a MOTS defeat hurts morale badly; players tire ~1% more (league MOTS 3/4/5% by age vs 2/3/4%). Our own reports don't show attitude; `prox_adv.asp` shows the opponent's MOTS used.
 - **Changed:** attitude is now ±0.9 stars on every zone (was ±8% goal rate). Season planner: every remaining league/cup fixture rated (opponent zones from their reports), gain = points with MOTS − without − 0.5 pt × P(loss with MOTS); MOTS goes to the top fixtures for the MOTS left, set on the orders page (`Team_attitude`) by the orders autopilot, and counted per season (user can correct 0/1/2).
