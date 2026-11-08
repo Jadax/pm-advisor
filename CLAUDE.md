@@ -21,7 +21,7 @@ Single-file Tampermonkey userscript: `pm-copilot.user.js` (one IIFE) for pmanage
 
 ## Learning (all in the browser)
 - `autoPilot` order: refresh → scout → `learn()` → orders → `recordDecision()` → events → lecture → training → contracts. Learning runs before decisions on purpose.
-- `learn()` also runs `learnRating` → `calibrateModel` → `learnShapes`. The autopilot re-runs every 30 min while a tab is open.
+- `learn()` also runs `learnRating` → `learnLanes` → `calibrateModel` → `learnShapes`. The autopilot re-runs every 30 min while a tab is open.
 - `learn()`: daily `crawlDivision` (every division report + rosters; `pruneReports` caps storage at 600, keeps own + next opponent), `recordGrowth` (per-session training gains by potential grade, deduped by player|lastDate, skips skills ≥18), `gradeMatches` (decision vs report, Brier vs pundits), `calibrateModel` (grid search, robust pick within 1 log-lik of best; needs 30+ reports).
 - `goalRate()` is the single goal formula — used by `simulate()` and by both calibrations (`calibrateModel` in the script, `model/fit.js` offline). Change it in one place and keep `fit.js`'s `lambda` identical.
 - `db.model` (ME constants + growth table) is applied at load by `applyModel`; the built-in `ME`/`GROWTH` are only starting values.
@@ -100,6 +100,7 @@ Single-file Tampermonkey userscript: `pm-copilot.user.js` (one IIFE) for pmanage
 - Next match home/away comes from the fixture list — the next-match pundit line doesn't always name the home side first.
 - MOTS/PIC = ±`MOTS_STARS` on every zone; `motsPlan` spends the season's 2 on the best remaining fixtures; own uses are tracked in `db.mots` (reports don't show attitude). `Team_attitude` options: Normal / Play it Cool / Match of the Season.
  — use a function replacement or split/join.
+- Report commentary (`#comments li.rf-item`, kinds `--goal/--at/--sub/--ht/--final`) → `side.moves` {L,C,R, goals, by finisher} + `side.atMsgs`; `learnLanes` fits goalRate's lane split (`LANE_EXP`, `LANE_MID`, mirrored in `fit.js`); `attackLanes(team)` = their recent lane shares.
 - No foreign-player limit in lineups (checked 2026-11-04); `parseAcademyPage().minNational` watches the federation's "Minimum Number of National Players" in case a referendum adds one.
 - Best value ranks on net cost (fee − discounted `resaleShare` after `RESALE_YEARS` + a season of wages); Best buys respect `prefs.maxBuyAge` (default 29). Nobody over `MAX_BUY_AGE_ANY` (31: must play this season + next — the user never buys to flip) anywhere; `seasonGain` weights this season by `seasonLeft()` (unplayed league rounds) — otherwise near-free 36-year-olds top Best value.
 - A listing's "Ask. Price" is the auction floor, not the cost — always budget on expected cost (`AUCTION_RATIO` × Value, never below the ask). Read real Values for affordable-ask upgrades too (`runScan`), or the price model learns only from expensive players and prices everything out; `bids` = ask fits, fee doesn't, with `winChance` (log-normal, `AUCTION_SPREAD`). Search `sort=1` with `field` = that skill = best first.

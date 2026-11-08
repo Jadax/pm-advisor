@@ -8,6 +8,12 @@ Newest first. Written by the daily review (and by hand) whenever the data change
 - **Not changed:** no new evidence; weather still <30 games per condition, advanced tactics confounded by team strength, calibration can't be judged on 1 graded match. The in-browser learner keeps refitting on the user's side.
 - **Watch:** open the browser pane signed in to pmanager.org before the next run so the Cup QF, the Greater Tzaneen MOTS game and the new rounds can be harvested and graded.
 
+## 2026-11-08 — v0.14.0 (match commentary)
+- **Data:** every report's commentary is now parsed — each attacking move credited to the side of its first-named player and the lane of that side's last-named outfielder (the finisher), goals per lane, finishers per player, and the advanced-tactic confirmations ("able to use their long shots ability", "keeper's style is confusing the forwards", "marking style working", "lacking strength", "winning one-on-ones"...). 86 division reports re-read: 472 moves, 217 of 363 goals (substitutes aren't on the report's pitch, so their moves are missed).
+- **Found:** attacks pile into a side's strongest lane far more than assumed. Lane share ∝ (attack + 0.25·midfield)^4 fits 71 performances with log-lik −342.8 vs −389.7 for the old (attack + 0.5·midfield)^2 and −490 uniform; an extra right-side bias adds nothing once the exponent is 4 (right attack zones average 5.78 vs left 5.30, centre 3.14). Goal likelihood unchanged (−234.8 vs −234.4) — lanes decide where chances come from, not how many.
+- **Changed:** goalRate's lane split uses learned LANE_EXP / LANE_MID (`learnLanes`, refit with the model; `model/fit.js` mirrors it). Opponent card shows where they attack (e.g. Pretoria: right 47% · centre 26% · left 26%, last 6 games).
+- **Watch:** use the AT confirmations to grade our advanced-tactic calls; credit substitutes' moves.
+
 ## 2026-11-08 — v0.13.0 (availability, condition, own rating, formation learning)
 - **Bug:** injured and suspended players were never excluded — Emerson (injured 3 days) was in the XI for 11/11. The squad page's status icons are now read; anyone still out on match day is left out. Unhappiness is read from the same icons.
 - **Last match (07/11, 3–0 vs Umtata):** played 5-2-3 without Brekhun, Farag, Dziadzio, Šeremet (all 100% fit) — not the engine's XI. The autopilot only runs while a pmanager tab is open, so orders for that match were most likely never saved. Baez off at 59' was a plain substitution, not an injury and not one of the engine's events.

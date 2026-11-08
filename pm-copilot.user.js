@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PM Copilot — Planetarium Manager assistant
 // @namespace    pm-copilot
-// @version      0.13.0
+// @version      0.14.0
 // @description  Opponent-aware tactics, match prep autopilot, training, transfers, finance and facilities for pmanager.org — learns from every match. Changelog: github.com/Jadax/pm-advisor
 // @author       Tushant Sharma
 // @license      MIT
@@ -23,7 +23,7 @@
 (() => {
   'use strict';
   if (window.top !== window.self) return;
-  const VERSION = '0.13.0';
+  const VERSION = '0.14.0';
   const PAGE = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
 
   /* =========================================================================
@@ -562,6 +562,7 @@
 
   const ZONE_KEY = { Defender: 'def', Midfield: 'mid', Attack: 'att' };
   const LANE_KEY = { Left: 'L', Center: 'C', Centre: 'C', Right: 'R' };
+  const ATTACK_RE = /shot|shoot|header|heads|goal|save|keeper|the bar|post|wide|cross|the box|the area|clear|dribbl|chance|one on one/i;
   function parseReportPage(doc, u) {
     const ft = flatText(doc.body);
     const id = u.searchParams.get('jogo_id') || (ft.match(/Game ID\s*(\d+)/i) || [])[1];
@@ -584,6 +585,30 @@
       sides[isFinite(x) && x < 50 ? 0 : 1].players.push(p);
     }
     sides.forEach((s, i) => inferReportPositions(s, i === 0));
+    // Commentary: an attacking move belongs to the side of its first named player; its lane is that of the
+    // side's last-named outfielder in it (the one who shoots or heads). Goals counted per lane as well.
+    const sideOf = pid => sides.findIndex(x => x.players.some(p => p.id === pid));
+    for (const x of sides) x.moves = { L: 0, C: 0, R: 0, goals: { L: 0, C: 0, R: 0 }, by: {} };
+    for (const li of $$('#comments li.rf-item', doc)) {
+      if (/rf-item--(at|sub|ht|final)/.test(li.className)) continue;
+      const body = clean(li.textContent);
+      if (!ATTACK_RE.test(body) || /booked|yellow card|red card|sent off|injur/i.test(body)) continue;
+      const ids = $$('a[href*="jog_id="]', li).map(a => param(a.getAttribute('href'), 'jog_id'));
+      const si = ids.length ? sideOf(ids[0]) : -1;
+      if (si < 0) continue;
+      const own = ids.filter(pid => sideOf(pid) === si);
+      const fin = sides[si].players.find(p => p.id === own[own.length - 1]);
+      if (!fin || fin.gk || !fin.lane) continue;
+      const mv = sides[si].moves;
+      mv[fin.lane]++;
+      if (/rf-item--goal/.test(li.className)) mv.goals[fin.lane]++;
+      mv.by[fin.id] = (mv.by[fin.id] || 0) + 1;
+    }
+    for (const li of $$('#comments li.rf-item--at', doc)) {
+      const t = clean(li.textContent).replace(/^\d+'\s*/, '');
+      const si = sides.findIndex(x => t.includes(x.team));
+      if (si >= 0) (sides[si].atMsgs = sides[si].atMsgs || []).push(t.slice(0, 140));
+    }
     for (const tr of $$('#stats tr', doc)) {
       const c = Array.from(tr.cells).map(x => clean(x.textContent));
       if (c.length >= 4 && c[0] && !/^formation$/i.test(c[0])) { sides[0].stats[c[0]] = c[1]; sides[1].stats[c[0]] = c[3]; }
@@ -1176,7 +1201,7 @@
     const attacks = P.BASE * (fx.w * poss + (1 - fx.w) * 0.5);
     const pw = PREF_W[pref] || {};
     // where we attack depends on our strength in that lane (midfield + attack) and the chosen side
-    const wts = LANES.map(l => Math.max(0.5, att.att[l] + 0.5 * att.mid[l]) ** 2 * (pw[l] || 1));
+    const wts = LANES.map(l => Math.max(0.5, att.att[l] + (P.LANE_MID ?? 0.5) * att.mid[l]) ** (P.LANE_EXP ?? 2) * (pw[l] || 1));
     const tw = sum(wts);
     let g = 0;
     LANES.forEach((l, i) => {
@@ -1249,6 +1274,37 @@
     applyRating(rating);
     save();
     return rating;
+  }
+  /* Where attacks go: each side's commentary moves per lane against the model's lane weights
+   * (attack + m·midfield)^k, multinomial likelihood over a grid. Feeds goalRate's lane split. */
+  function learnLanes() {
+    const obs = [];
+    for (const r of Object.values(db.reports)) if (r.sides?.length === 2 && r.sides.every(fullZones)) for (const s of r.sides) {
+      const n = s.moves ? LANES.map(l => s.moves[l] || 0) : null;
+      if (n && sum(n) >= 3) obs.push({ z: s.zones, n });
+    }
+    if (obs.length < 30) return null;
+    let best = null;
+    for (const k of [0, 0.5, 1, 1.5, 2, 3, 4]) for (const m of [0, 0.25, 0.5, 1]) {
+      let ll = 0;
+      for (const o of obs) {
+        const w = LANES.map(l => Math.max(0.5, o.z.att[l] + m * o.z.mid[l]) ** k), tw = sum(w);
+        o.n.forEach((c, i) => (ll += c * Math.log(w[i] / tw)));
+      }
+      if (!best || ll > best.ll) best = { k, m, ll };
+    }
+    db.model = { ...db.model, LANE_EXP: best.k, LANE_MID: best.m, laneOn: obs.length, laneLogLik: +best.ll.toFixed(1) };
+    applyModel(db.model);
+    save();
+    return best;
+  }
+  // Their recent attacking moves by lane (share), from the commentary of their reports.
+  function attackLanes(name, n = 6) {
+    const h = teamHistory(name).filter(x => x.s.moves).slice(0, n);
+    const c = { L: 0, C: 0, R: 0 };
+    h.forEach(x => LANES.forEach(l => (c[l] += x.s.moves[l] || 0)));
+    const t = sum(Object.values(c));
+    return t >= 8 ? { games: h.length, moves: t, share: Object.fromEntries(LANES.map(l => [l, c[l] / t])) } : null;
   }
   // Each shape's goals for/against relative to the model across the division's reports, shrunk toward 1.
   const SHAPE_PRIOR = 8; // goals of prior weight
@@ -2613,7 +2669,7 @@
   const GROWTH_PRIOR = GROWTH.slice();
   const MIN_CAL_GAMES = 30, MAX_REPORTS = 600, GROWTH_PRIOR_WEIGHT = 5;
   function applyModel(p) {
-    for (const k of ['BASE', 'K_BEAT', 'K_GK', 'K_MID']) if (isFinite(p[k])) ME[k] = p[k];
+    for (const k of ['BASE', 'K_BEAT', 'K_GK', 'K_MID', 'LANE_EXP', 'LANE_MID']) if (isFinite(p[k])) ME[k] = p[k];
     if (p.rating) applyRating(p.rating);
     if (Array.isArray(p.growth) && p.growth.length === GROWTH.length) GROWTH.splice(0, GROWTH.length, ...p.growth);
   }
@@ -2662,7 +2718,7 @@
     const ll = P => games.reduce((s, r) => s + logPois(goalRate(r.sides[0].zones, r.sides[1].zones, r.sides[0].passing, P), r.score[0]) + logPois(goalRate(r.sides[1].zones, r.sides[0].zones, r.sides[1].passing, P), r.score[1]), 0);
     const grid = [];
     for (const BASE of [4, 5, 6, 7, 8, 10]) for (const K_BEAT of [0.75, 1, 1.5, 2, 3]) for (const K_GK of [0.75, 1, 1.5, 2, 3]) for (const K_MID of [1, 2, 4, 8]) {
-      const P = { BASE, K_BEAT, K_GK, K_MID };
+      const P = { BASE, K_BEAT, K_GK, K_MID, LANE_EXP: ME.LANE_EXP, LANE_MID: ME.LANE_MID }; // lanes come from learnLanes
       grid.push({ P, ll: ll(P) });
     }
     grid.sort((a, b) => b.ll - a.ll);
@@ -2787,7 +2843,7 @@
     recordGrowth();
     gradeMatches();
     progress('Calibrating…');
-    if (!db.model?.fittedAt || now() - db.model.fittedAt > 20 * 3600e3 || (db.model.fittedOn || 0) + 20 <= Object.keys(db.reports).length) { learnRating(); calibrateModel(); learnShapes(); }
+    if (!db.model?.fittedAt || now() - db.model.fittedAt > 20 * 3600e3 || (db.model.fittedOn || 0) + 20 <= Object.keys(db.reports).length) { learnRating(); learnLanes(); calibrateModel(); learnShapes(); }
     else if (!db.model?.shapeFx) learnShapes();
   }
   const today = () => new Date().toISOString().slice(0, 10);
@@ -3052,6 +3108,7 @@ input.txt{flex:1;height:26px;border:1px solid var(--line);background:var(--bg);c
       const freq = o.team?.freq ? Object.entries(o.team.freq).sort((a, b) => b[1] - a[1]).map(([f, n]) => `${f} ×${n}`).join(', ') : '';
       h += sec('opp', esc(o.name), `
         <div class="sm">Expect <b>${esc(formDetail(o.form))}</b> · ${esc(o.style)} / ${esc(o.passing)}${ats.length ? ` · plays ${ats.map(([k, v]) => `${k} ${v}`).join(', ')}` : ''}</div>
+        ${(() => { const a = attackLanes(o.name); return a ? `<div class="xs mut" style="margin-top:2px">They attack: left ${pct(a.share.L)} · centre ${pct(a.share.C)} · right ${pct(a.share.R)} (${a.moves} moves, last ${a.games} games)</div>` : ''; })()}
         ${freq ? `<div class="xs mut" style="margin-top:2px">Last 20: ${esc(freq)}${isFinite(o.team?.motsUsed) ? ` · MOTS used ${o.team.motsUsed}` : ''}</div>` : ''}
         ${o.tired.length ? `<div class="xs" style="margin-top:2px;color:var(--warn)">Tired: ${o.tired.map(t => esc(surname(t.name))).join(', ')}</div>` : ''}
         <div style="margin-top:8px">${zoneGrid(plan)}</div>
@@ -3362,5 +3419,5 @@ input.txt{flex:1;height:26px;border:1px solid var(--line);background:var(--bg);c
   setInterval(() => { if (!document.hidden || now() - (db.lastPilotAt || 0) > 3600e3) { db.lastPilotAt = now(); autoPilot().catch(e => console.warn('[PM Copilot] autopilot', e)); } }, 30 * 60e3);
   if (GM_getValue('pmc_open', false)) setOpen(true);
   if (window.__PMC_TEST) window.__PMC_TEST.version = VERSION;
-  if (window.__PMC_TEST) window.__PMC_TEST.api = { db: () => db, ingest, fetchDoc, grab, parseSkillPlayers, computePlan, trainingAdvice, clubAdvice, staffAdvice, scoutOpponent, refreshAll, calibration, snapshot, render, setOpen, planEvents, lectureChoice, autoPilot, applyOrders, autoEvents, autoLecture, autoRenew, autoTraining, prep, rankCandidates, badgeMarketRows, valuePath, learn, calibrateModel, gradeMatches, learnSummary, recordGrowth, recordDecision, scanMarket, runScan, recruitBoard, fairPriceModel, searchUrl, specialityPlan, youthMoves, autoYouth, autoSpeciality, goalRate, motsPlan, learnShapes, learnRating, slotScore, zonesFor, toStars, calibration, ROLE_W };
+  if (window.__PMC_TEST) window.__PMC_TEST.api = { db: () => db, ingest, fetchDoc, grab, parseSkillPlayers, computePlan, trainingAdvice, clubAdvice, staffAdvice, scoutOpponent, refreshAll, calibration, snapshot, render, setOpen, planEvents, lectureChoice, autoPilot, applyOrders, autoEvents, autoLecture, autoRenew, autoTraining, prep, rankCandidates, badgeMarketRows, valuePath, learn, calibrateModel, gradeMatches, learnSummary, recordGrowth, recordDecision, scanMarket, runScan, recruitBoard, fairPriceModel, searchUrl, specialityPlan, youthMoves, autoYouth, autoSpeciality, goalRate, motsPlan, learnShapes, learnRating, learnLanes, attackLanes, slotScore, zonesFor, toStars, calibration, ROLE_W };
 })();

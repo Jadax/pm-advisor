@@ -26,7 +26,7 @@ function lambda(A, B, passing, P) {
   const p = sig((midA - midB) / P.K_MID);
   const fx = PASS_FX[passing] || PASS_FX.Short;
   const attacks = P.BASE * (fx.w * p + (1 - fx.w) * 0.5);
-  const w = LANES.map(l => Math.max(0.5, A.att[l] + 0.5 * A.mid[l]) ** 2);
+  const w = LANES.map(l => Math.max(0.5, A.att[l] + (P.LANE_MID ?? 0.5) * A.mid[l]) ** (P.LANE_EXP ?? 2));
   const tw = w[0] + w[1] + w[2];
   let g = 0;
   LANES.forEach((l, i) => {
