@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PM Copilot — Planetarium Manager assistant
 // @namespace    pm-copilot
-// @version      0.14.1
+// @version      0.15.0
 // @description  Opponent-aware tactics, match prep autopilot, training, transfers, finance and facilities for pmanager.org — learns from every match. Changelog: github.com/Jadax/pm-advisor
 // @author       Tushant Sharma
 // @license      MIT
@@ -23,7 +23,7 @@
 (() => {
   'use strict';
   if (window.top !== window.self) return;
-  const VERSION = '0.14.1';
+  const VERSION = '0.15.0';
   const PAGE = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
 
   /* =========================================================================
@@ -1547,6 +1547,15 @@
     const used = db.mots.base + db.mots.used.filter(k => played.has(k)).length;
     return { used, left: Math.max(0, MOTS_PER_SEASON - used), pending: db.mots.used.filter(k => !played.has(k)) };
   }
+  // How a division opponent plays, from their reports (unknown side: an even match with our own zones).
+  function sideFromHistory(opp, home, fallbackZ) {
+    const h = teamHistory(opp).filter(x => x.zones);
+    const z = h.length ? reportZones(h) : JSON.parse(JSON.stringify(fallbackZ));
+    const form = formFromString(modeOf(h.slice(0, 5).map(x => x.formation)) || '4-4-2');
+    z.n = { D: {}, M: {}, F: {} };
+    for (const line of ['D', 'M', 'F']) for (const l of LANES) z.n[line][l] = form[line][l];
+    return { z, style: modeOf(h.slice(0, 3).map(x => x.style)) || 'Normal', passing: modeOf(h.slice(0, 3).map(x => x.passing)) || 'Short', home: !home, attitude: 'Normal', atWon: 0, shape: shapeKey(form), known: h.length > 0 };
+  }
   function motsPlan(plan) {
     if (!plan?.best || !db.fixtures?.list?.length) return null;
     const me = norm(db.me.name || '');
@@ -1558,15 +1567,7 @@
     const base = { z: plan.best.z, style: plan.best.style, passing: plan.best.passing, atWon: plan.best.ats?.won || 0, pref: plan.pref, shape: shapeKey(plan.best.f) };
     const rows = db.fixtures.list.filter(f => !f.score && /Lg.|Cup/i.test(f.type) && [norm(f.home), norm(f.away)].includes(me)).map(f => {
       const key = fixtureKey(f), home = key === nextK ? plan.home : norm(f.home) === me, opp = norm(f.home) === me ? f.away : f.home;
-      let side = key === nextK ? plan.oppSide : null;
-      if (!side) {
-        const h = teamHistory(opp).filter(x => x.zones);
-        const z = h.length ? reportZones(h) : JSON.parse(JSON.stringify(plan.best.z)); // unknown side: an even match
-        const form = formFromString(modeOf(h.slice(0, 5).map(x => x.formation)) || '4-4-2');
-        z.n = { D: {}, M: {}, F: {} };
-        for (const line of ['D', 'M', 'F']) for (const l of LANES) z.n[line][l] = form[line][l];
-        side = { z, style: modeOf(h.slice(0, 3).map(x => x.style)) || 'Normal', passing: modeOf(h.slice(0, 3).map(x => x.passing)) || 'Short', home: !home, attitude: 'Normal', atWon: 0, shape: shapeKey(form) };
-      }
+      const side = key === nextK ? plan.oppSide : sideFromHistory(opp, home, plan.best.z);
       const n = simulate({ ...base, home, attitude: 'Normal' }, side), m = simulate({ ...base, home, attitude: 'MOTS' }, side);
       const cup = /cup/i.test(f.type);
       const value = r => (cup ? 3 * (r.w + r.d / 2) : 3 * r.w + r.d); // a cup draw is a coin flip to go through
@@ -1610,7 +1611,8 @@
       const line = p.line || 'M';
       const fit = t?.fit;
       let rec, why;
-      if (isFinite(fit) && fit < AM_FITNESS) { rec = 'Fitness'; why = `fitness ${fit}% — league training adds +15%`; }
+      // with an assistant the game swaps anyone under the line to Fitness per session, so orders stay on skills
+      if (isFinite(fit) && fit < AM_FITNESS && db.training?.amFitness == null) { rec = 'Fitness'; why = `fitness ${fit}% — under 80% the skill session is penalised anyway; league training adds +15%`; }
       else {
         const cands = Object.entries(ROLE_W[line])
           .filter(([k]) => (p.sk?.[k] ?? 0) < 20 && (!allowed || allowed.has(norm(SKILL_NAME[k]))))
@@ -1821,20 +1823,28 @@
   const PEAK_AGE = 26;
   const HORIZON = 5, DISCOUNT = 0.85;
 
-  // Rating bonus for a talent, given the plan we actually play (effects aren't published — kept small).
+  /* Rating effect of a talent with the plan we actually play — manual §7 "The Talents": ±2 global skill.
+   * Passing specialists: +2 in their passing, 0 in Mixed, −2 otherwise. Style-minded: +2/−2 Attacking/Defensive.
+   * AT specialists: only while that AT is on, +2 to its two skills and −2 global skill. Fast/Strong swing with the
+   * weather (≈0 on average); Aggressive/Coward follow hard/soft tackling (we play normal); Sore Loser evens out. */
+  const TALENT_AT = { 'low pressing': ['pressing', 'Low', ['TCK']], 'high pressing': ['pressing', 'High', ['SPE', 'PAS']], 'offside trap': ['offside', true, ['POS', 'SPE']], 'counter attack': ['counter', true, ['PAS', 'SPE']], 'high balls': ['highBalls', true, ['HEA', 'STR']], 'one on one': ['oneOnOne', true, ['TEC', 'STR']], 'zonal marking': ['marking', 'Zonal', ['SPE', 'TCK']], 'man-to-man': ['marking', 'Man to Man', ['STR', 'TCK']], 'long-shots': ['longShots', true, ['FIN', 'TEC']], 'first-time': ['firstTime', true, ['FIN', 'HEA']] };
   function talentBonus(talent, plan, line) {
     const t = norm(talent || '');
     if (!t || t === 'none' || t === '–') return 0;
-    const a = plan?.best?.ats || {}, pass = plan?.best?.passing;
-    if (/fast|strong/.test(t)) return 0.3;
-    if (/coward|sore loser/.test(t)) return -0.3;
-    if (/aggressive/.test(t)) return -0.1;
-    if (/motivated starter/.test(t)) return 0.15;
-    if (/attack-minded/.test(t)) return line === 'F' || line === 'M' ? 0.15 : -0.1;
-    if (/defense-minded/.test(t)) return line === 'D' ? 0.15 : -0.1;
-    const uses = { 'short pass': pass === 'Short', 'long pass': pass === 'Long', 'direct pass': pass === 'Direct', 'low pressing': a.pressing === 'Low', 'high pressing': a.pressing === 'High', 'offside trap': a.offside, 'counter attack': a.counter, 'high balls': a.highBalls, 'one on one': a.oneOnOne, 'zonal marking': a.marking === 'Zonal', 'man-to-man': a.marking === 'Man to Man', 'long-shots': a.longShots, 'first-time': a.firstTime };
-    const hit = Object.entries(uses).find(([k]) => t.includes(k));
-    return hit ? (hit[1] ? 0.25 : 0.05) : 0;
+    const a = plan?.best?.ats || {}, pass = plan?.best?.passing, style = plan?.best?.style;
+    for (const [k, p] of [['short pass', 'Short'], ['long pass', 'Long'], ['direct pass', 'Direct']]) if (t.includes(k)) return pass === p ? 2 : pass === 'Mixed' ? 0 : -2;
+    if (/attack-minded/.test(t)) return style === 'Attacking' ? 2 : style === 'Defensive' ? -2 : 0;
+    if (/defense-minded/.test(t)) return style === 'Defensive' ? 2 : style === 'Attacking' ? -2 : 0;
+    if (/motivated starter/.test(t)) return 2; // we buy starters
+    if (/substitute hero/.test(t)) return -2;
+    const hit = Object.entries(TALENT_AT).find(([k]) => t.includes(k));
+    if (hit) {
+      const [key, on, ks] = hit[1];
+      if (a[key] !== on) return 0;
+      // low pressing is +2 tackling and −2 speed: slower helps that AT, so only the tackling counts here
+      return sum(ks.map(k => 2 * (ROLE_W[line]?.[k] || 0))) - 2;
+    }
+    return 0;
   }
 
   // Season-by-season skills for one player, training spent where his position gains most. Uses his own
@@ -2092,16 +2102,23 @@
     return { n: data.length, byValue, price: r => { const v = valuePath(r, { line: r.line, lane: (r.sides || 'C')[0], code: '' }, null); return Math.exp(sum(feats(r, v).map((x, i) => x * w[i]))); } };
   }
 
-  // How much each XI slot matters in this match model: expected points gained from +1 rating there.
+  /* How much each XI slot matters: expected points from +1 rating there, averaged over every league fixture
+   * of the season (home and away, each opponent as their reports show them). A signing plays all of them —
+   * weighting by the next opponent alone pushed every recommendation into one line. */
   function slotImpact(plan) {
-    const b = plan.best;
-    const base = { style: b.style, passing: b.passing, home: plan.home, attitude: 'Normal', atWon: b.ats?.won || 0, pref: plan.pref, shape: shapeKey(b.f) };
+    const b = plan.best, me = norm(db.me.name || '');
+    const base = { style: b.style, passing: b.passing, attitude: 'Normal', atWon: b.ats?.won || 0, pref: plan.pref, shape: shapeKey(b.f) };
     const pts = r => 3 * r.w + r.d;
-    const ref = pts(simulate({ ...base, z: toStars(zonesFor(b.xi), plan.cal) }, plan.oppSide));
-    const raw = b.xi.map((x, i) => {
-      const xi = b.xi.map((y, j) => (j === i ? { ...y, score: y.score + 1 } : y));
-      return Math.max(1e-4, pts(simulate({ ...base, z: toStars(zonesFor(xi), plan.cal) }, plan.oppSide)) - ref);
-    });
+    const zs = [toStars(zonesFor(b.xi), plan.cal), ...b.xi.map((x, i) => toStars(zonesFor(b.xi.map((y, j) => (j === i ? { ...y, score: y.score + 1 } : y))), plan.cal))];
+    const games = (db.fixtures?.list || []).filter(f => /Lg/i.test(f.type) && [norm(f.home), norm(f.away)].includes(me))
+      .map(f => { const home = norm(f.home) === me; return { home, side: sideFromHistory(home ? f.away : f.home, home, b.z) }; })
+      .filter(g => g.side.known);
+    if (!games.length) games.push({ home: plan.home, side: plan.oppSide });
+    const raw = b.xi.map(() => 0);
+    for (const g of games) {
+      const ref = pts(simulate({ ...base, home: g.home, z: zs[0] }, g.side));
+      b.xi.forEach((x, i) => (raw[i] += Math.max(1e-4, pts(simulate({ ...base, home: g.home, z: zs[i + 1] }, g.side)) - ref) / games.length));
+    }
     const mean = avg(raw);
     return new Map(b.xi.map((x, i) => [x.slot, raw[i] / mean])); // 1 = average slot
   }
@@ -2390,8 +2407,9 @@
   }
   /* Manual §16: an assistant manager trains a skill only above quality 0 (that is set by who you hire, not
    * here), but any assistant lets players under a fitness level train Fitness automatically after matches —
-   * the game does it even with no tab open, so it is set to the same line trainingAdvice uses. */
-  const AM_FITNESS = 75;
+   * the game does it even with no tab open. Manual §8: below 80% at training time a skill session is
+   * penalised, while a fitness session gives +15% after league games (+5% cup/friendly). */
+  const AM_FITNESS = 80; // manual: under 80% at training time (right after the match) the session is penalised
   function staffTrainingTarget(doc) {
     const adv = trainingAdvice();
     const form = $$('form', doc).find(f => /treinarglobal/i.test(f.getAttribute('action') || ''));
@@ -3438,5 +3456,5 @@ input.txt{flex:1;height:26px;border:1px solid var(--line);background:var(--bg);c
   setInterval(() => { if (!document.hidden || now() - (db.lastPilotAt || 0) > 3600e3) { db.lastPilotAt = now(); autoPilot().catch(e => console.warn('[PM Copilot] autopilot', e)); } }, 30 * 60e3);
   if (GM_getValue('pmc_open', false)) setOpen(true);
   if (window.__PMC_TEST) window.__PMC_TEST.version = VERSION;
-  if (window.__PMC_TEST) window.__PMC_TEST.api = { db: () => db, ingest, fetchDoc, grab, parseSkillPlayers, computePlan, trainingAdvice, clubAdvice, staffAdvice, scoutOpponent, refreshAll, calibration, snapshot, render, setOpen, planEvents, lectureChoice, autoPilot, applyOrders, autoEvents, autoLecture, autoRenew, autoTraining, trainingDue, staffTrainingTarget, prep, rankCandidates, badgeMarketRows, valuePath, learn, calibrateModel, gradeMatches, learnSummary, recordGrowth, recordDecision, scanMarket, runScan, recruitBoard, fairPriceModel, searchUrl, specialityPlan, youthMoves, autoYouth, autoSpeciality, goalRate, motsPlan, learnShapes, learnRating, learnLanes, attackLanes, slotScore, zonesFor, toStars, calibration, ROLE_W };
+  if (window.__PMC_TEST) window.__PMC_TEST.api = { db: () => db, ingest, fetchDoc, grab, parseSkillPlayers, computePlan, trainingAdvice, clubAdvice, staffAdvice, scoutOpponent, refreshAll, calibration, snapshot, render, setOpen, planEvents, lectureChoice, autoPilot, applyOrders, autoEvents, autoLecture, autoRenew, autoTraining, trainingDue, slotImpact, talentBonus, staffTrainingTarget, prep, rankCandidates, badgeMarketRows, valuePath, learn, calibrateModel, gradeMatches, learnSummary, recordGrowth, recordDecision, scanMarket, runScan, recruitBoard, fairPriceModel, searchUrl, specialityPlan, youthMoves, autoYouth, autoSpeciality, goalRate, motsPlan, learnShapes, learnRating, learnLanes, attackLanes, slotScore, zonesFor, toStars, calibration, ROLE_W };
 })();

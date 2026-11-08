@@ -2,6 +2,12 @@
 
 Newest first. Written by the daily review (and by hand) whenever the data changes the engine.
 
+## 2026-11-08 — v0.15.0 (auto-fitness, season-wide transfer weights, published talents)
+- **Training (manual §8, §16):** a player under 80% fitness when training runs (straight after the match) gets a penalised session; fitness training adds +15% after league games, +5% after cup/friendly. An assistant manager trains a skill only above quality 0 (ours is 0/5), but any assistant can switch players under a fitness line to Fitness automatically — the game does it with no tab open. The autopilot keeps that line at 80% and leaves individual orders on skills. The line was found reset to 0 once; it is now re-checked every run. Players with no individual order (new signings) only get +1% fitness.
+- **Transfers (data):** a 1007-listing scan covered every line and upgrades existed at every slot, but Best buys / value / stretch / bids were all forwards. Cause: each gain was weighted by the slot's effect against the next opponent only (LF ×2.58, CD ×0.16). Slot weights are now averaged over every league fixture of the season, each opponent as their reports show them. Ratings already use all 12 skills (secondaries 37%, physicals 13% of a primary, refit from our reports).
+- **Talents (manual §7):** effects are published — ±2 global skill: passing specialists +2 in their passing / −2 in others (0 in Mixed), Attack/Defense-minded ±2 by style, Motivated Starter +2 and Substitute Hero −2 as starters, AT specialists −2 global skill with +2 on that AT's skills only while it is on. Replaces guessed ±0.3.
+- **Checked against TrainingPredictor v5 (2010):** per-session gain by potential (Terrible 0.004–0.048 … World Class 0.436–0.48, steps of 0.048) and ×0.75 a year from 21 agree with our measured GROWTH once staff/fitness factors are applied, and with the manual's −25%/year. Its AT skill pairs match evalATs except Low Pressing, where the manual's specialist (+2 tackling, −2 speed) backs our slower-side rule. RankingPointsCalc is national-team ranking only.
+
 ## 2026-11-08 — no change (v0.14.0 stays)
 - **Data:** no fresh harvest (browser pane closed); local data unchanged since 01/11 — 99 reports, 2 decisions, 1 graded match (model Brier 0.001 vs pundits 0.639).
 - **Refit:** identical (robust BASE 6, K_BEAT 1.5, K_GK 1, K_MID 8; −253.6 vs −455.2 constant-rate).
