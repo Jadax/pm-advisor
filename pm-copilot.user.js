@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PM Copilot — Planetarium Manager assistant
 // @namespace    pm-copilot
-// @version      0.15.1
+// @version      0.15.2
 // @description  Opponent-aware tactics, match prep autopilot, training, transfers, finance and facilities for pmanager.org — learns from every match. Changelog: github.com/Jadax/pm-advisor
 // @author       Tushant Sharma
 // @license      MIT
@@ -23,7 +23,7 @@
 (() => {
   'use strict';
   if (window.top !== window.self) return;
-  const VERSION = '0.15.1';
+  const VERSION = '0.15.2';
   const PAGE = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
 
   /* =========================================================================
@@ -2033,12 +2033,13 @@
 
   // "31/10/26 06:04" → ms; listings past their deadline are gone.
   const deadlineMs = s => { const m = String(s || '').match(/(\d{1,2})\/(\d{1,2})\/(\d{2,4})\s+(\d{1,2}):(\d{2})/); return m ? new Date(+m[3] < 100 ? 2000 + +m[3] : +m[3], m[2] - 1, +m[1], +m[4], +m[5]).getTime() : null; };
+  const LISTING_TTL = 30 * 3600e3; // two missed scans
   function mergeListings(rows, source) {
     const pool = (db.scan = db.scan || { rows: {}, at: null }).rows;
     for (const r of rows) pool[r.id] = { ...pool[r.id], ...r, source, seenAt: now() };
     for (const [id, r] of Object.entries(pool)) {
       const dl = deadlineMs(r.deadline);
-      if ((dl && dl < now()) || now() - r.seenAt > 4 * 86400e3) delete pool[id];
+      if ((dl && dl < now()) || now() - r.seenAt > LISTING_TTL) delete pool[id];
     }
   }
 
@@ -2136,7 +2137,6 @@
   function recruitBoard(plan) {
     if (!plan?.best) return null;
     const listings = Object.values(db.scan?.rows || {});
-    for (const r of db.market?.rows || []) if (!listings.some(x => x.id === r.id)) listings.push(r);
     const mine = new Set((db.squad?.players || []).map(p => p.id));
     const cands = listings.filter(r => !mine.has(r.id) && r.line);
     const caps = buyCaps();
@@ -2196,20 +2196,44 @@
     return { caps, fair, best, value, stretch, bids, slots, maxAge, all: uniq, minNational: db.academy?.minNational, n: cands.length, scannedAt: db.scan?.at };
   }
 
-  // The game's own Value for the shortlist (player page), to show how far under value a price is.
-  async function fetchValues(entries, progress = () => {}) {
+  /* Player page: the game's Value, and whether he can still be bought — "Currently in transfer list" for an
+   * auction, a sign link (assinar_livres) for a free agent. Neither means sold or signed: off the board. */
+  const listingStatus = doc => (/Currently in transfer list/i.test(flatText(doc.body)) ? 'listed' : doc.querySelector('a[href*="assinar_livres"]') ? 'free' : 'gone');
+  async function fetchValues(entries, progress = () => {}, maxAge = 2 * 3600e3) {
     db.playerValues = db.playerValues || {};
+    const pool = db.scan?.rows || {};
+    let gone = 0;
     for (const e of entries) {
-      if (db.playerValues[e.c.id] && now() - db.playerValues[e.c.id].at < 86400e3) continue;
-      progress(`Value: ${e.c.name}…`);
+      const row = pool[e.c.id];
+      if (!row || (row.checkedAt && now() - row.checkedAt < maxAge)) continue;
+      progress(`Checking ${e.c.name}…`);
       try {
         const { doc } = await fetchDoc('/ver_jogador.asp?jog_id=' + e.c.id);
+        if (listingStatus(doc) === 'gone') { delete pool[e.c.id]; gone++; continue; }
+        row.checkedAt = now();
         const v = num((flatText(doc.body).match(/Contract Length\s*\d+\s*years?\s*Wage\s*\$?[\d.,]+\s*Value\s*\$?([\d.,]+)/i) || flatText(doc.body).match(/\bValue\s*\$([\d.,]+)/) || [])[1]);
-        if (isFinite(v)) db.playerValues[e.c.id] = { value: v, at: now() };
+        if (isFinite(v) && !row.free) db.playerValues[e.c.id] = { value: v, at: now() };
       } catch { /* skip */ }
       await sleep(120);
     }
     save();
+    return gone;
+  }
+  // Everyone the Scout tab shows, checked live; repeats while removals pull new players onto the board.
+  const boardEntries = b => [...new Map([...b.best, ...b.value, ...b.stretch, ...b.bids, ...b.slots.flatMap(s => [s.best, s.value])].filter(Boolean).map(e => [e.c.id, e])).values()];
+  async function verifyBoard(progress = () => {}) {
+    let gone = 0;
+    for (let pass = 0; pass < 4; pass++) {
+      const board = recruitBoard(computePlan());
+      if (!board) break;
+      const g = await fetchValues(boardEntries(board), progress);
+      gone += g;
+      if (!g) break;
+    }
+    db.scan.verifiedAt = now();
+    save();
+    if (gone) logAction('market', `${gone} shortlisted player${gone === 1 ? '' : 's'} sold or signed — removed`);
+    return gone;
   }
   async function runScan(progress = () => {}) {
     const n = await scanMarket(progress);
@@ -2220,9 +2244,9 @@
       const board = recruitBoard(computePlan());
       if (!board) break;
       const affordable = board.all.filter(e => (e.c.price || 0) <= board.caps.max).sort((a, b) => b.w - a.w).slice(0, 15);
-      const short = [...new Map([...board.best, ...board.value, ...board.stretch, ...board.slots.flatMap(s => [s.best, s.value]), ...affordable].filter(Boolean).map(e => [e.c.id, e])).values()].filter(e => !e.c.free);
-      await fetchValues(short, progress);
+      await fetchValues([...new Map([...boardEntries(board), ...affordable].map(e => [e.c.id, e])).values()], progress);
     }
+    await verifyBoard(progress);
     logAction('market', `Scanned ${n} listings · ${Object.keys(db.scan?.rows || {}).length} live`);
     return [`${Object.keys(db.scan?.rows || {}).length} live listings scanned`];
   }
@@ -2900,10 +2924,11 @@
     piloting = true;
     const step = async (name, fn) => { try { setStatus(name + '…'); await fn(); } catch (e) { logAction(name, e.message, false); } };
     try {
-      if (db.prefs.autoRefresh && (!db.lastRefresh || now() - db.lastRefresh > 6 * 3600e3)) await step('Refreshing data', () => refreshAll(setStatus));
+      if (db.prefs.autoRefresh && (!db.lastRefresh || now() - db.lastRefresh > 2 * 3600e3)) await step('Refreshing data', () => refreshAll(setStatus));
       if (db.prefs.autoRefresh && scoutStale()) await step('Scouting', () => scoutOpponent(setStatus));
       if (db.prefs.autoLearn) await step('Learning', () => learn(setStatus)); // recalibrate before any decision
       if (db.prefs.autoLearn && (!db.scan?.at || now() - db.scan.at > 12 * 3600e3)) await step('Market scan', () => runScan(setStatus));
+      else if (db.prefs.autoLearn && db.scan && now() - (db.scan.verifiedAt || 0) > 2 * 3600e3) await step('Checking shortlist', () => verifyBoard(setStatus));
       if (db.prefs.autoYouth && (!db.youthCheckedAt || now() - db.youthCheckedAt > 12 * 3600e3)) await step('Youth team', autoYouth); // before orders: it changes who is available
       if (db.next && db.prefs.autoApply) await step('Match orders', () => applyOrders({ force: forceOrders }));
       if (db.next) recordDecision();
@@ -3332,7 +3357,7 @@ input.txt{flex:1;height:26px;border:1px solid var(--line);background:var(--bg);c
   function viewAuto() {
     const sw = (k, label, sub) => `<div class="opt"><div><div class="b">${label}</div><div class="xs mut">${sub}</div></div><button class="sw ${db.prefs[k] ? 'on' : ''}" data-act="pref" data-pref="${k}" aria-pressed="${!!db.prefs[k]}" title="${db.prefs[k] ? 'On' : 'Off'}"></button></div>`;
     let h = sec('auto', 'Autopilot', `
-      ${sw('autoRefresh', 'Keep data fresh', 'Every 6 h; re-scouts the opponent every 12 h.')}
+      ${sw('autoRefresh', 'Keep data fresh', 'Every 2 h; funds from every page; re-scouts the opponent every 12 h; shortlist re-checked every 2 h.')}
       ${sw('autoApply', 'Match orders', 'XI, style, passing, every advanced option, side, captain, penalties.')}
       ${sw('autoSave', '…and save them', 'Off = filled in, you press Save.')}
       ${sw('autoEvents', 'Match events', 'Rebuilt per match: chase/protect/sent-off style changes and up to 3 subs. Your own events are kept.')}
@@ -3465,5 +3490,5 @@ input.txt{flex:1;height:26px;border:1px solid var(--line);background:var(--bg);c
   setInterval(() => { if (!document.hidden || now() - (db.lastPilotAt || 0) > 3600e3) { db.lastPilotAt = now(); autoPilot().catch(e => console.warn('[PM Copilot] autopilot', e)); } }, 30 * 60e3);
   if (GM_getValue('pmc_open', false)) setOpen(true);
   if (window.__PMC_TEST) window.__PMC_TEST.version = VERSION;
-  if (window.__PMC_TEST) window.__PMC_TEST.api = { db: () => db, ingest, fetchDoc, grab, parseSkillPlayers, computePlan, trainingAdvice, clubAdvice, staffAdvice, scoutOpponent, refreshAll, calibration, snapshot, render, setOpen, planEvents, lectureChoice, autoPilot, applyOrders, autoEvents, autoLecture, autoRenew, autoTraining, trainingDue, slotImpact, talentBonus, staffTrainingTarget, prep, rankCandidates, badgeMarketRows, valuePath, learn, calibrateModel, gradeMatches, learnSummary, recordGrowth, recordDecision, scanMarket, runScan, recruitBoard, fairPriceModel, searchUrl, specialityPlan, youthMoves, autoYouth, autoSpeciality, goalRate, motsPlan, learnShapes, learnRating, learnLanes, attackLanes, slotScore, zonesFor, toStars, calibration, ROLE_W };
+  if (window.__PMC_TEST) window.__PMC_TEST.api = { db: () => db, ingest, fetchDoc, grab, parseSkillPlayers, computePlan, trainingAdvice, clubAdvice, staffAdvice, scoutOpponent, refreshAll, calibration, snapshot, render, setOpen, planEvents, lectureChoice, autoPilot, applyOrders, autoEvents, autoLecture, autoRenew, autoTraining, trainingDue, verifyBoard, fetchValues, slotImpact, talentBonus, staffTrainingTarget, prep, rankCandidates, badgeMarketRows, valuePath, learn, calibrateModel, gradeMatches, learnSummary, recordGrowth, recordDecision, scanMarket, runScan, recruitBoard, fairPriceModel, searchUrl, specialityPlan, youthMoves, autoYouth, autoSpeciality, goalRate, motsPlan, learnShapes, learnRating, learnLanes, attackLanes, slotScore, zonesFor, toStars, calibration, ROLE_W };
 })();
