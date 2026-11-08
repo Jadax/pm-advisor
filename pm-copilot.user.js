@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PM Copilot — Planetarium Manager assistant
 // @namespace    pm-copilot
-// @version      0.14.0
+// @version      0.14.1
 // @description  Opponent-aware tactics, match prep autopilot, training, transfers, finance and facilities for pmanager.org — learns from every match. Changelog: github.com/Jadax/pm-advisor
 // @author       Tushant Sharma
 // @license      MIT
@@ -23,7 +23,7 @@
 (() => {
   'use strict';
   if (window.top !== window.self) return;
-  const VERSION = '0.14.0';
+  const VERSION = '0.14.1';
   const PAGE = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
 
   /* =========================================================================
@@ -374,8 +374,9 @@
       const s = c.querySelector('select[name="atributos"]');
       return { role: clean(c.querySelector('.tr-card__role')?.textContent), q: num((clean(c.querySelector('.tr-card__q b')?.textContent).match(/(\d)\s*\/\s*5/) || [])[1]), skill: clean(s.options[s.selectedIndex]?.textContent) };
     });
+    const amFit = doc.querySelector('form[action*="treinarglobal"] input[name="minimum_fitness"]');
     db.training = {
-      rows, options: [...options], staff,
+      rows, options: [...options], staff, amFitness: amFit ? num(amFit.value) : null,
       current: clean((text.match(/Current Training\s+([A-Za-z ]+?)\s*\n/i) || [])[1]),
       lastDate: (text.match(/Last Training\s+([\d/]+)/i) || [])[1] || null,
       at: now(),
@@ -1609,7 +1610,7 @@
       const line = p.line || 'M';
       const fit = t?.fit;
       let rec, why;
-      if (isFinite(fit) && fit < 75) { rec = 'Fitness'; why = `fitness ${fit}% — league training adds +15%`; }
+      if (isFinite(fit) && fit < AM_FITNESS) { rec = 'Fitness'; why = `fitness ${fit}% — league training adds +15%`; }
       else {
         const cands = Object.entries(ROLE_W[line])
           .filter(([k]) => (p.sk?.[k] ?? 0) < 20 && (!allowed || allowed.has(norm(SKILL_NAME[k]))))
@@ -2387,11 +2388,28 @@
     }
     return n;
   }
+  /* Manual §16: an assistant manager trains a skill only above quality 0 (that is set by who you hire, not
+   * here), but any assistant lets players under a fitness level train Fitness automatically after matches —
+   * the game does it even with no tab open, so it is set to the same line trainingAdvice uses. */
+  const AM_FITNESS = 75;
   function staffTrainingTarget(doc) {
     const adv = trainingAdvice();
-    const staff = $$('form', doc).find(f => /treinarglobal/i.test(f.getAttribute('action') || ''))?.querySelector('select[name="atributos"]');
+    const form = $$('form', doc).find(f => /treinarglobal/i.test(f.getAttribute('action') || ''));
+    if (!form) return null;
+    const staff = form.querySelector('select[name="atributos"]'), fit = form.querySelector('input[name="minimum_fitness"]');
     const top = adv.teamRec.find(([skill]) => staff && Array.from(staff.options).some(o => norm(o.textContent) === norm(skill)));
-    return staff && top && norm(staff.options[staff.selectedIndex]?.textContent) !== norm(top[0]) ? { staff, skill: top[0] } : null;
+    const skill = staff && top && norm(staff.options[staff.selectedIndex]?.textContent) !== norm(top[0]) ? top[0] : null;
+    const fitness = fit && num(fit.value) !== AM_FITNESS ? AM_FITNESS : null;
+    return skill || fitness != null ? { form, staff, skill, fit, fitness } : null;
+  }
+  // Due when any order is off (a new signing starts on None) or the assistant's threshold is unset; else every 12 h.
+  async function trainingDue() {
+    await grab('/treinos.asp?equipa=A');
+    const ids = new Set((db.squad?.players || []).map(p => p.id));
+    if ((db.training?.rows || []).some(r => !ids.has(r.id))) await grab('/plantel.asp');
+    const off = trainingAdvice().rows.some(r => r.mismatch);
+    const am = db.training?.amFitness != null && db.training.amFitness !== AM_FITNESS;
+    return off || am || !db.trainingAppliedAt || now() - db.trainingAppliedAt > 12 * 3600e3;
   }
   async function autoTraining() {
     const ready = ({ doc }) => !!doc.querySelector('select[name="atributos"]');
@@ -2404,14 +2422,15 @@
       }
       const d2 = frame.contentDocument, st = staffTrainingTarget(d2);
       if (st) {
-        setSelect(st.staff, st.skill, frame.contentWindow);
-        st.staff.form.querySelector('input[type=submit][name=trein]').click();
+        if (st.skill) setSelect(st.staff, st.skill, frame.contentWindow);
+        if (st.fitness != null) st.fit.value = String(st.fitness);
+        st.form.querySelector('input[type=submit][name=trein]').click();
         await new Promise(r => frame.addEventListener('load', r, { once: true }));
       }
-      return { n, staff: st?.skill };
+      return { n, staff: st?.skill, amFitness: st?.fitness };
     });
     await grab('/treinos.asp?equipa=A');
-    if (changed.n || changed.staff) logAction('training', `${changed.n} individual order${changed.n === 1 ? '' : 's'} changed${changed.staff ? ` · staff → ${changed.staff}` : ''}`);
+    if (changed.n || changed.staff || changed.amFitness != null) logAction('training', [`${changed.n} individual order${changed.n === 1 ? '' : 's'} changed`, changed.staff && `staff → ${changed.staff}`, changed.amFitness != null && `assistant trains fitness below ${changed.amFitness}%`].filter(Boolean).join(' · '));
     return changed;
   }
 
@@ -2863,7 +2882,7 @@
       if (db.next) recordDecision();
       if (db.next && db.prefs.autoEvents) await step('Match events', autoEvents);
       if (db.next && db.prefs.autoLecture) await step('Lecture', autoLecture);
-      if (db.prefs.autoTraining && (!db.trainingAppliedAt || now() - db.trainingAppliedAt > 12 * 3600e3)) await step('Training', async () => { await autoTraining(); db.trainingAppliedAt = now(); save(); });
+      if (db.prefs.autoTraining) await step('Training', async () => { if (await trainingDue()) { await autoTraining(); db.trainingAppliedAt = now(); save(); } });
       if (db.prefs.autoRenew && (!db.contractsCheckedAt || now() - db.contractsCheckedAt > 12 * 3600e3)) await step('Contracts', autoRenew);
       if (db.prefs.autoSpeciality && specialityPlan(clubAdvice().fin)?.verdict === 'set') await step('Academy', autoSpeciality); // re-checks on a fresh page first
     } finally {
@@ -3291,7 +3310,7 @@ input.txt{flex:1;height:26px;border:1px solid var(--line);background:var(--bg);c
       ${sw('autoSave', '…and save them', 'Off = filled in, you press Save.')}
       ${sw('autoEvents', 'Match events', 'Rebuilt per match: chase/protect/sent-off style changes and up to 3 subs. Your own events are kept.')}
       ${sw('autoLecture', 'Lecture', 'Once per match, the intensity with the best expected morale gain — none if all are negative.')}
-      ${sw('autoTraining', 'Training', 'Individual orders and staff training, every 12 h.')}
+      ${sw('autoTraining', 'Training', 'Individual orders, staff training and the assistant’s automatic fitness line — checked every autopilot run, so new signings are set straight away.')}
       ${sw('autoRenew', 'Contract renewals', 'Keepers with 1 year left, at their minimum asked wage, within the wage roof.')}
       ${sw('autoYouth', 'Youth team', '17–18-year-olds outside the XI go back to the youth team (full training every league round); keeps 14 players and a spare keeper.')}
       ${sw('autoSpeciality', 'Academy speciality', 'Once a season, before promotions, when the model says it pays and funds stay above the safety buffer after the fee + a season of upkeep.')}
@@ -3419,5 +3438,5 @@ input.txt{flex:1;height:26px;border:1px solid var(--line);background:var(--bg);c
   setInterval(() => { if (!document.hidden || now() - (db.lastPilotAt || 0) > 3600e3) { db.lastPilotAt = now(); autoPilot().catch(e => console.warn('[PM Copilot] autopilot', e)); } }, 30 * 60e3);
   if (GM_getValue('pmc_open', false)) setOpen(true);
   if (window.__PMC_TEST) window.__PMC_TEST.version = VERSION;
-  if (window.__PMC_TEST) window.__PMC_TEST.api = { db: () => db, ingest, fetchDoc, grab, parseSkillPlayers, computePlan, trainingAdvice, clubAdvice, staffAdvice, scoutOpponent, refreshAll, calibration, snapshot, render, setOpen, planEvents, lectureChoice, autoPilot, applyOrders, autoEvents, autoLecture, autoRenew, autoTraining, prep, rankCandidates, badgeMarketRows, valuePath, learn, calibrateModel, gradeMatches, learnSummary, recordGrowth, recordDecision, scanMarket, runScan, recruitBoard, fairPriceModel, searchUrl, specialityPlan, youthMoves, autoYouth, autoSpeciality, goalRate, motsPlan, learnShapes, learnRating, learnLanes, attackLanes, slotScore, zonesFor, toStars, calibration, ROLE_W };
+  if (window.__PMC_TEST) window.__PMC_TEST.api = { db: () => db, ingest, fetchDoc, grab, parseSkillPlayers, computePlan, trainingAdvice, clubAdvice, staffAdvice, scoutOpponent, refreshAll, calibration, snapshot, render, setOpen, planEvents, lectureChoice, autoPilot, applyOrders, autoEvents, autoLecture, autoRenew, autoTraining, trainingDue, staffTrainingTarget, prep, rankCandidates, badgeMarketRows, valuePath, learn, calibrateModel, gradeMatches, learnSummary, recordGrowth, recordDecision, scanMarket, runScan, recruitBoard, fairPriceModel, searchUrl, specialityPlan, youthMoves, autoYouth, autoSpeciality, goalRate, motsPlan, learnShapes, learnRating, learnLanes, attackLanes, slotScore, zonesFor, toStars, calibration, ROLE_W };
 })();
