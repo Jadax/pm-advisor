@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PM Copilot — Planetarium Manager assistant
 // @namespace    pm-copilot
-// @version      0.15.2
+// @version      0.16.0
 // @description  Opponent-aware tactics, match prep autopilot, training, transfers, finance and facilities for pmanager.org — learns from every match. Changelog: github.com/Jadax/pm-advisor
 // @author       Tushant Sharma
 // @license      MIT
@@ -23,7 +23,7 @@
 (() => {
   'use strict';
   if (window.top !== window.self) return;
-  const VERSION = '0.15.2';
+  const VERSION = '0.16.0';
   const PAGE = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
 
   /* =========================================================================
@@ -699,6 +699,7 @@
     db.details[id] = {
       form: (ft.match(/\bForm\s+(Very Bad|Very Good|Bad|Normal|Good)/i) || [])[1] || null, experience: g('Experience'), professionalism: g('Professionalism'), penalties: g('Penalties'),
       integration: g('Team Integration'),
+      talent: clean(doc.querySelector('tr.vj-talent font.comentarios')?.textContent) || null,
       happiness: num((ft.match(/Happiness\s+(\d+)%/i) || [])[1]), health: num((ft.match(/Health\s+(\d+)%/i) || [])[1]),
       at: now(),
     };
@@ -922,7 +923,7 @@
       }
     }
     for (const p of db.squad?.players || []) {
-      if (!p.id || (db.details[p.id] && now() - db.details[p.id].at < 6 * 3600e3)) continue;
+      if (!p.id || (db.details[p.id] && 'talent' in db.details[p.id] && now() - db.details[p.id].at < 6 * 3600e3)) continue;
       progress(`Player ${p.name}…`);
       try { await grab('/ver_jogador.asp?jog_id=' + p.id); } catch (e) { /* non-critical */ }
       await sleep(120);
@@ -1377,7 +1378,7 @@
     return (db.squad?.players || []).filter(p => !ex.has(p.name) && p.tier !== 3 && !p.suspended && !(p.injuredDays >= Math.max(1, days))).map(p => {
       const t = matchPlayer(p.name, tr, p.id);
       const d = db.details[p.id] || {};
-      return { ...p, fit: t?.fit, potential: t?.potential, quality: t?.quality, form: d.form, experience: d.experience, professionalism: d.professionalism, penalties: d.penalties, happiness: d.happiness, integration: d.integration, rate: playerRate(p.id, t?.potential).rate };
+      return { ...p, fit: t?.fit, potential: t?.potential, quality: t?.quality, form: d.form, experience: d.experience, professionalism: d.professionalism, penalties: d.penalties, happiness: d.happiness, integration: d.integration, talent: d.talent, rate: playerRate(p.id, t?.potential).rate };
     });
   }
 
@@ -1501,11 +1502,13 @@
       if (!xi) continue;
       const z = addStars(toStars(zonesFor(xi), cal), tiShift(xi));
       const at = opp?.xi ? evalATs(xi, opp.xi) : null;
+      const talented = xi.some(x => x.p.talent);
       for (const style of STYLES) {
         const ats = decideATs(at, style, f, opp?.form, safe);
         for (const passing of PASSINGS) {
-          const r = simulate({ z, style, passing, home, attitude: 'Normal', atWon: ats?.won || 0, shape: shapeKey(f) }, oppSide);
-          results.push({ f, xi, z, style, passing, ats, at, r, val: objectiveValue(r, db.prefs.objective, pts) });
+          const zt = talented ? addStars(toStars(zonesFor(withTalents(xi, { style, passing, ats })), cal), tiShift(xi)) : z;
+          const r = simulate({ z: zt, style, passing, home, attitude: 'Normal', atWon: ats?.won || 0, shape: shapeKey(f) }, oppSide);
+          results.push({ f, xi, z: zt, style, passing, ats, at, r, val: objectiveValue(r, db.prefs.objective, pts) });
         }
       }
     }
@@ -1832,29 +1835,34 @@
   const PEAK_AGE = 26;
   const HORIZON = 5, DISCOUNT = 0.85;
 
-  /* Rating effect of a talent with the plan we actually play — manual §7 "The Talents": ±2 global skill.
+  /* Rating effect of a talent with the plan we actually play — manual §7 "The Talents": ±2 global skill. GS runs
+   * 0–100 (player page tip) and our ratings 0–20, so 2 GS = 0.4 rating; skill bonuses (+2 tackling…) are on 0–20.
    * Passing specialists: +2 in their passing, 0 in Mixed, −2 otherwise. Style-minded: +2/−2 Attacking/Defensive.
    * AT specialists: only while that AT is on, +2 to its two skills and −2 global skill. Fast/Strong swing with the
    * weather (≈0 on average); Aggressive/Coward follow hard/soft tackling (we play normal); Sore Loser evens out. */
   const TALENT_AT = { 'low pressing': ['pressing', 'Low', ['TCK']], 'high pressing': ['pressing', 'High', ['SPE', 'PAS']], 'offside trap': ['offside', true, ['POS', 'SPE']], 'counter attack': ['counter', true, ['PAS', 'SPE']], 'high balls': ['highBalls', true, ['HEA', 'STR']], 'one on one': ['oneOnOne', true, ['TEC', 'STR']], 'zonal marking': ['marking', 'Zonal', ['SPE', 'TCK']], 'man-to-man': ['marking', 'Man to Man', ['STR', 'TCK']], 'long-shots': ['longShots', true, ['FIN', 'TEC']], 'first-time': ['firstTime', true, ['FIN', 'HEA']] };
-  function talentBonus(talent, plan, line) {
+  const GS = 0.2; // one global-skill point in rating units
+  function talentBonus(talent, plan, line, role = 'starter') {
     const t = norm(talent || '');
     if (!t || t === 'none' || t === '–') return 0;
     const a = plan?.best?.ats || {}, pass = plan?.best?.passing, style = plan?.best?.style;
-    for (const [k, p] of [['short pass', 'Short'], ['long pass', 'Long'], ['direct pass', 'Direct']]) if (t.includes(k)) return pass === p ? 2 : pass === 'Mixed' ? 0 : -2;
-    if (/attack-minded/.test(t)) return style === 'Attacking' ? 2 : style === 'Defensive' ? -2 : 0;
-    if (/defense-minded/.test(t)) return style === 'Defensive' ? 2 : style === 'Attacking' ? -2 : 0;
-    if (/motivated starter/.test(t)) return 2; // we buy starters
-    if (/substitute hero/.test(t)) return -2;
+    for (const [k, p] of [['short pass', 'Short'], ['long pass', 'Long'], ['direct pass', 'Direct']]) if (t.includes(k)) return (pass === p ? 2 : pass === 'Mixed' ? 0 : -2) * GS;
+    if (/attack-minded/.test(t)) return (style === 'Attacking' ? 2 : style === 'Defensive' ? -2 : 0) * GS;
+    if (/defense-minded/.test(t)) return (style === 'Defensive' ? 2 : style === 'Attacking' ? -2 : 0) * GS;
+    // events: a starter vs a sub brought on from 60′ (all our scripted subs are)
+    if (/motivated starter/.test(t)) return (role === 'starter' ? 2 : -2) * GS;
+    if (/substitute hero/.test(t)) return (role === 'starter' ? -2 : 2) * GS;
     const hit = Object.entries(TALENT_AT).find(([k]) => t.includes(k));
     if (hit) {
       const [key, on, ks] = hit[1];
       if (a[key] !== on) return 0;
       // low pressing is +2 tackling and −2 speed: slower helps that AT, so only the tackling counts here
-      return sum(ks.map(k => 2 * (ROLE_W[line]?.[k] || 0))) - 2;
+      return sum(ks.map(k => 2 * (ROLE_W[line]?.[k] || 0))) - 2 * GS;
     }
     return 0;
   }
+  // Our XI with each player's talent applied for one tactical setup.
+  const withTalents = (xi, setup) => (xi.some(x => x.p.talent) ? xi.map(x => (x.p.talent ? { ...x, score: x.score + talentBonus(x.p.talent, { best: setup }, x.slot.line) } : x)) : xi);
 
   // Season-by-season skills for one player, training spent where his position gains most. Uses his own
   // measured rate when we have one (our players), else his grade's rate — and, either way, the share of a
@@ -2630,9 +2638,10 @@
     // substitutions (leave room for injuries)
     let subs = Math.min(3, maxSubs);
     const outOk = x => x.slot.line !== 'GK' && !reserved.has(x.p.id) && !used.has(x.p.id);
-    const likeForLike = x => bench.filter(b => !used.has(b.id) && posFactor(b, x.slot) >= 0.86).map(b => ({ b, s: slotScore(b, x.slot) })).sort((a, c) => c.s - a.s)[0];
+    const subScore = (b, slot) => slotScore(b, slot) + talentBonus(b.talent, plan, slot.line, 'sub');
+    const likeForLike = x => bench.filter(b => !used.has(b.id) && posFactor(b, x.slot) >= 0.86).map(b => ({ b, s: subScore(b, x.slot) })).sort((a, c) => c.s - a.s)[0];
     // chasing the game: an extra forward for the weakest midfielder (or spare defender)
-    const fwd = bench.filter(b => !used.has(b.id)).map(b => ({ b, s: slotScore(b, { line: 'F', lane: 'C' }) })).sort((a, c) => c.s - a.s)[0];
+    const fwd = bench.filter(b => !used.has(b.id)).map(b => ({ b, s: subScore(b, { line: 'F', lane: 'C' }) })).sort((a, c) => c.s - a.s)[0];
     const nM = xi.filter(x => x.slot.line === 'M').length, nD = xi.filter(x => x.slot.line === 'D').length;
     const sacrifice = xi.filter(x => outOk(x) && ((x.slot.line === 'M' && nM > 2) || (x.slot.line === 'D' && nD > 3))).sort((a, c) => a.score - c.score)[0];
     if (subs && fwd && fwd.s > 6 && sacrifice) {
@@ -3490,5 +3499,5 @@ input.txt{flex:1;height:26px;border:1px solid var(--line);background:var(--bg);c
   setInterval(() => { if (!document.hidden || now() - (db.lastPilotAt || 0) > 3600e3) { db.lastPilotAt = now(); autoPilot().catch(e => console.warn('[PM Copilot] autopilot', e)); } }, 30 * 60e3);
   if (GM_getValue('pmc_open', false)) setOpen(true);
   if (window.__PMC_TEST) window.__PMC_TEST.version = VERSION;
-  if (window.__PMC_TEST) window.__PMC_TEST.api = { db: () => db, ingest, fetchDoc, grab, parseSkillPlayers, computePlan, trainingAdvice, clubAdvice, staffAdvice, scoutOpponent, refreshAll, calibration, snapshot, render, setOpen, planEvents, lectureChoice, autoPilot, applyOrders, autoEvents, autoLecture, autoRenew, autoTraining, trainingDue, verifyBoard, fetchValues, slotImpact, talentBonus, staffTrainingTarget, prep, rankCandidates, badgeMarketRows, valuePath, learn, calibrateModel, gradeMatches, learnSummary, recordGrowth, recordDecision, scanMarket, runScan, recruitBoard, fairPriceModel, searchUrl, specialityPlan, youthMoves, autoYouth, autoSpeciality, goalRate, motsPlan, learnShapes, learnRating, learnLanes, attackLanes, slotScore, zonesFor, toStars, calibration, ROLE_W };
+  if (window.__PMC_TEST) window.__PMC_TEST.api = { db: () => db, ingest, fetchDoc, grab, parseSkillPlayers, computePlan, trainingAdvice, clubAdvice, staffAdvice, scoutOpponent, refreshAll, calibration, snapshot, render, setOpen, planEvents, lectureChoice, autoPilot, applyOrders, autoEvents, autoLecture, autoRenew, autoTraining, trainingDue, verifyBoard, fetchValues, squadPool, withTalents, slotImpact, talentBonus, staffTrainingTarget, prep, rankCandidates, badgeMarketRows, valuePath, learn, calibrateModel, gradeMatches, learnSummary, recordGrowth, recordDecision, scanMarket, runScan, recruitBoard, fairPriceModel, searchUrl, specialityPlan, youthMoves, autoYouth, autoSpeciality, goalRate, motsPlan, learnShapes, learnRating, learnLanes, attackLanes, slotScore, zonesFor, toStars, calibration, ROLE_W };
 })();

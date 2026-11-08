@@ -2,6 +2,12 @@
 
 Newest first. Written by the daily review (and by hand) whenever the data changes the engine.
 
+## 2026-11-08 — v0.16.0 (talents in tactics, right scale)
+- **Scale fix:** the player page defines GS (global skill) as 0–100; our ratings run 0–20, so a talent's ±2 GS is ±0.4 rating, not ±2 (v0.15.0 overstated it 5×). Skill bonuses of AT specialists (+2 tackling…) stay on the 0–20 skill scale.
+- **Our squad:** talents are now read from each player's page (`tr.vj-talent`): dos Santos Zonal Marking Specialist, Kesici and Slater Motivated Starter, Mohd Direct Pass Specialist.
+- **Tactics:** every formation × style × passing (and the ATs that style turns on) is scored with the XI's talents applied, so passing/style specialists and AT specialists tilt the choice. Scripted substitutions favour Substitute Heroes (+2 GS coming on) and avoid Motivated Starters (−2 GS).
+- **Transfer list:** unchanged path (valuePath → talentBonus with the plan we play), now on the right scale.
+
 ## 2026-11-08 — v0.15.0 (auto-fitness, season-wide transfer weights, published talents)
 - **Training (manual §8, §16):** a player under 80% fitness when training runs (straight after the match) gets a penalised session; fitness training adds +15% after league games, +5% after cup/friendly. An assistant manager trains a skill only above quality 0 (ours is 0/5), but any assistant can switch players under a fitness line to Fitness automatically — the game does it with no tab open. The autopilot keeps that line at 80% and leaves individual orders on skills. The line was found reset to 0 once; it is now re-checked every run. Players with no individual order (new signings) only get +1% fitness.
 - **Transfers (data):** a 1007-listing scan covered every line and upgrades existed at every slot, but Best buys / value / stretch / bids were all forwards. Cause: each gain was weighted by the slot's effect against the next opponent only (LF ×2.58, CD ×0.16). Slot weights are now averaged over every league fixture of the season, each opponent as their reports show them. Ratings already use all 12 skills (secondaries 37%, physicals 13% of a primary, refit from our reports).
