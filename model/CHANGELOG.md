@@ -2,6 +2,13 @@
 
 Newest first. Written by the daily review (and by hand) whenever the data changes the engine.
 
+## 2026-11-09 — v0.17.0 (defence valued properly; MOTS by the final table)
+- **Data:** 99 harvested division reports (198 performances). A Poisson fit of goals on zone stars: +1 star of our attack +0.213 ±0.033, +1 star of their defence −0.186 ±0.088, midfield +0.048, keeper −0.094 — attack and defence about even. The engine had attack +0.60 vs defence −0.31: its "robust" pick took the flattest K_BEAT within 1 log-lik of the best, and a flat K_BEAT makes defence matter little. That is why the transfer board kept recommending forwards.
+- **Changed:** calibrateModel / fit.js now use the likelihood-weighted average of the grid (K_BEAT 0.5 and 0.6 added). In-browser refit on 77 reports: K_BEAT 1.5 → 0.90, K_GK 1.30, BASE 5.07, K_MID 6.96; best fits put defence at −0.57…−0.82 per star vs attack +0.67…+0.84. Starting values updated.
+- **Transfer weights:** slot impact is measured at +1, +3 and +6 rating (season-averaged) and each upgrade is weighed at its own size — attacks pile into a side's strongest lane, so a big upgrade in a weak lane is worth more than its +1 slope (CF 0.32 per point at +1, 0.98 at +6). Board now spans F/M/D; forwards still lead because each forward is alone in his lane's zone and attacks concentrate in strong lanes (472 commentary moves).
+- **MOTS:** the rest of the league season is simulated (3000 runs, all 20 remaining fixtures, each team from its reports) for every way of spending what is left, scored on final position (promotion 10, 2nd 1, 3rd 0.5, relegation −10) + 0.05/point − morale cost of a MOTS defeat − fatigue 0.15 pts per use. Rival head-to-heads count double by construction; games that can't move the table keep it. Human opponents (team page links a manager; bots show a generated one with "Manager Focus" — 7 bots, 2 humans in B-4) answer with MOTS 30% of the time if they have any left. Playoffs (2nd vs 7th/8th above, only with >3 divisions; MOTS carries into them) reserve one when 2nd is likely — none in South Africa since season 96.
+- **Today:** 2nd place 100%, promotion 0% (Newcastle 42 pts, 14/14) → keep both MOTS. With Newcastle only 2 ahead the plan spends them @ Pretoria and vs Qwa-Qwa.
+
 ## 2026-11-08 — v0.16.0 (talents in tactics, right scale)
 - **Scale fix:** the player page defines GS (global skill) as 0–100; our ratings run 0–20, so a talent's ±2 GS is ±0.4 rating, not ±2 (v0.15.0 overstated it 5×). Skill bonuses of AT specialists (+2 tackling…) stay on the 0–20 skill scale.
 - **Our squad:** talents are now read from each player's page (`tr.vj-talent`): dos Santos Zonal Marking Specialist, Kesici and Slater Motivated Starter, Mohd Direct Pass Specialist.

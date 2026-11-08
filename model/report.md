@@ -1,12 +1,12 @@
 # PM Copilot model report
 
-Generated 2026-11-03 14:36 from 99 reports (99 with full zone ratings).
+Generated 2026-11-08 22:46 from 99 reports (99 with full zone ratings).
 
 ## Goal model
 
 | | BASE | K_BEAT | K_GK | K_MID | log-lik |
 |---|---|---|---|---|---|
-| **Released (robust)** | 6 | 1.5 | 1 | 8 | -253.58 |
+| **Released (robust)** | 5.945 | 1.033 | 1.317 | 7.393 | -253.39 |
 | Best fit | 6 | 1 | 1.25 | 8 | -253.12 |
 | Constant-rate baseline | | | | | -455.17 |
 

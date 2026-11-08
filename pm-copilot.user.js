@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PM Copilot — Planetarium Manager assistant
 // @namespace    pm-copilot
-// @version      0.16.0
+// @version      0.17.0
 // @description  Opponent-aware tactics, match prep autopilot, training, transfers, finance and facilities for pmanager.org — learns from every match. Changelog: github.com/Jadax/pm-advisor
 // @author       Tushant Sharma
 // @license      MIT
@@ -23,7 +23,7 @@
 (() => {
   'use strict';
   if (window.top !== window.self) return;
-  const VERSION = '0.16.0';
+  const VERSION = '0.17.0';
   const PAGE = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
 
   /* =========================================================================
@@ -317,6 +317,17 @@
     return t;
   }
   const teamByName = name => Object.values(db.teams).find(t => norm(t.name) === norm(name));
+  // Standings: cells pos | move | team | P | W | D | L | GF | GA | GD | Pts; is-up / is-down rows mark the zones.
+  function parseStandingsPage(doc) {
+    const rows = $$('tr.inf-st__row', doc).map(r => {
+      const c = Array.from(r.cells).map(x => clean(x.textContent));
+      return { pos: num(c[0]), name: c[2], played: num(c[3]), gf: num(c[7]), ga: num(c[8]), gd: num(c[9]), pts: num(c[10]), up: r.classList.contains('is-up'), down: r.classList.contains('is-down'), me: r.classList.contains('is-you') };
+    }).filter(r => r.name && isFinite(r.pts));
+    if (rows.length < 4) return null;
+    db.standings = { rows, up: rows.filter(r => r.up).length || 1, down: rows.filter(r => r.down).length, at: now() };
+    save();
+    return `Standings: ${rows.length} teams`;
+  }
   const nameForTeamId = id => Object.entries(db.teamLinks).find(([, h]) => param(h, 'equipa') === id)?.[0];
 
   // ver_equipa.asp — team info (manager) or, with vjog=1, the player list (quality grades, no skills).
@@ -326,7 +337,7 @@
     const name = ctx.teamName || db.teams['t' + id]?.name || nameForTeamId(id) || 'Team ' + id;
     const team = upsertTeam(id, name);
     const mgr = (flatText(doc.body).match(/Place\s*Manager\s*(.+?)\s*(?:Vice-)?President/) || [])[1];
-    if (mgr && !u.searchParams.get('vjog')) team.manager = clean(mgr);
+    if (mgr && !u.searchParams.get('vjog')) { team.manager = clean(mgr); team.bot = /Manager Focus/.test(flatText(doc.body)); team.botAt = now(); }
     const rows = $$('tr.sq-row', doc).filter(r => playerLink(r));
     if (rows.length) {
       const hdr = rows[0].closest('table').rows[0];
@@ -825,6 +836,7 @@
   }
 
   const ROUTES = [
+    [/classificacao\.asp/i, parseStandingsPage],
     [/plantel\.asp/i, parseSquadPage],
     [/treinos\.asp/i, parseTrainingPage],
     [/financas\.asp/i, parseEconomyPage],
@@ -1203,7 +1215,7 @@
   // Works in match-engine star units. BASE/K_* are fitted (Poisson likelihood) on real reports:
   // zone ratings from the Action Zones tab against final scores. These are the starting values;
   // calibrateModel() refits them in the browser from the report database as it grows.
-  const ME = { BASE: 6, K_BEAT: 1.5, K_GK: 1, K_MID: 8 };
+  const ME = { BASE: 5, K_BEAT: 0.75, K_GK: 1.25, K_MID: 8 }; // 99-report fit with LANE_EXP 4 (2026-11-09)
   const midOf = z => (z.mid.L + 2 * z.mid.C + z.mid.R) / 4;
   // Expected goals for `att` against `def` (zones already adjusted for style, home and numbers).
   function goalRate(att, def, passing, P = ME, pref = null) {
@@ -1568,6 +1580,18 @@
     for (const line of ['D', 'M', 'F']) for (const l of LANES) z.n[line][l] = form[line][l];
     return { z, style: modeOf(h.slice(0, 3).map(x => x.style)) || 'Normal', passing: modeOf(h.slice(0, 3).map(x => x.passing)) || 'Short', home: !home, attitude: 'Normal', atWon: 0, shape: shapeKey(form), known: h.length > 0 };
   }
+  /* MOTS where it moves the final table most. The rest of the league season is simulated (every remaining
+   * fixture, ours and the others', each side as its reports show it) for each way of spending what is left;
+   * the score is the final position — promotion first, then the prize places — plus a little for points and a
+   * morale cost for a MOTS defeat. Head-to-heads with rivals count double by construction (our win is their
+   * loss); games that can't change the table are worth little. Human opponents may answer with their own
+   * MOTS (bots never do); where the country plays promotion playoffs, one can be kept for the playoff game. */
+  const POS_VALUE = { promo: 10, second: 1, third: 0.5, releg: -10 };
+  const PTS_VALUE = 0.05; // one league point, in the same units (keeps decided seasons from being indifferent)
+  const HUMAN_MOTS = 0.3; // chance a human opponent with MOTS left uses one against us
+  const PLAYOFF_SWING = 0.12; // MOTS on a near-even one-off game: win chance up ~12 points (model, ±0.9 star)
+  const SEASON_SIMS = 3000;
+  const MOTS_FATIGUE = 0.15; // manual: MOTS tires players more — in points, so a game that can't move the table keeps it
   function motsPlan(plan) {
     if (!plan?.best || !db.fixtures?.list?.length) return null;
     const me = norm(db.me.name || '');
@@ -1577,18 +1601,97 @@
     const nextF = oppNext && db.fixtures.list.find(f => !f.score && [norm(f.home), norm(f.away)].includes(oppNext));
     const nextK = nextF ? fixtureKey(nextF) : null;
     const base = { z: plan.best.z, style: plan.best.style, passing: plan.best.passing, atWon: plan.best.ats?.won || 0, pref: plan.pref, shape: shapeKey(plan.best.f) };
+    const theirMots = name => { const t = teamByName(name); return !t || t.bot !== false || (t.motsUsed ?? 0) >= MOTS_PER_SEASON ? 0 : HUMAN_MOTS; };
+    const vsOpp = (us, side, opp) => {
+      const p = theirMots(opp), a = simulate(us, side);
+      if (!p) return a;
+      const b = simulate(us, { ...side, attitude: 'MOTS' });
+      return { w: (1 - p) * a.w + p * b.w, d: (1 - p) * a.d + p * b.d, l: (1 - p) * a.l + p * b.l };
+    };
     const rows = db.fixtures.list.filter(f => !f.score && /Lg.|Cup/i.test(f.type) && [norm(f.home), norm(f.away)].includes(me)).map(f => {
       const key = fixtureKey(f), home = key === nextK ? plan.home : norm(f.home) === me, opp = norm(f.home) === me ? f.away : f.home;
       const side = key === nextK ? plan.oppSide : sideFromHistory(opp, home, plan.best.z);
-      const n = simulate({ ...base, home, attitude: 'Normal' }, side), m = simulate({ ...base, home, attitude: 'MOTS' }, side);
+      const n = vsOpp({ ...base, home, attitude: 'Normal' }, side, opp), m = vsOpp({ ...base, home, attitude: 'MOTS' }, side, opp);
       const cup = /cup/i.test(f.type);
       const value = r => (cup ? 3 * (r.w + r.d / 2) : 3 * r.w + r.d); // a cup draw is a coin flip to go through
-      return { f, key, opp, home, cup, n, m, gain: value(m) - value(n) - MOTS_LOSS_COST * m.l, next: key === nextK };
+      return { f, key, opp, home, cup, n, m, bot: teamByName(opp)?.bot, gain: value(m) - value(n) - MOTS_LOSS_COST * m.l, next: key === nextK };
     });
     const left = S.left - S.pending.filter(k => k !== nextK).length;
+    const table = seasonTable(rows, plan.best.z, me);
+    if (table) {
+      // league rows: their worth comes from the table simulation; cup ties keep their knockout value (in points)
+      const opts = [...rows.filter(r => !r.cup), ...(table.playoff ? [table.playoff] : [])];
+      const cupGain = r => r.gain * PTS_VALUE;
+      const subsets = [[]];
+      for (const o of [...opts, ...rows.filter(r => r.cup)]) for (const sub of subsets.slice()) if (sub.length < left) subsets.push([...sub, o]);
+      const score = sub => table.value(new Set(sub.filter(r => !r.cup && !r.playoff).map(r => r.key))) + sum(sub.filter(r => r.cup).map(cupGain)) + sum(sub.filter(r => r.playoff).map(r => r.value)) - PTS_VALUE * MOTS_FATIGUE * sub.filter(r => !r.playoff).length;
+      const none = score([]);
+      for (const r of opts) r.gain = (score([r]) - none) / PTS_VALUE; // points-equivalent, for display
+      for (const r of rows.filter(x => x.cup)) r.gain -= MOTS_FATIGUE;
+      const best = subsets.map(sub => ({ sub, v: score(sub) })).sort((a, b) => b.v - a.v)[0];
+      const picks = best.v > none ? best.sub : [];
+      return { ...S, left, rows, picks, use: picks.some(r => r.next), nextKey: nextK, outlook: table.outlook, playoffs: db.playoffs?.active };
+    }
     const ranked = rows.slice().sort((a, b) => b.gain - a.gain);
     const picks = ranked.slice(0, Math.max(0, left)).filter(r => r.gain > MOTS_MIN_GAIN);
     return { ...S, left, rows, picks, use: picks.some(r => r.next), nextKey: nextK };
+  }
+  // Monte Carlo of the rest of the league: returns value(set of our fixture keys played with MOTS) and our outlook.
+  function seasonTable(ourRows, fallbackZ, me) {
+    const st = db.standings;
+    if (!st?.rows?.length) return null;
+    const all = [...(db.fixtures?.list || []), ...Object.values(db.teams).flatMap(t => t.fixtures || [])].filter(f => /Lg/i.test(f.type) && !f.score);
+    const games = [...new Map(all.map(f => [fixtureKey(f), f])).values()];
+    const names = st.rows.map(r => r.name), idx = new Map(names.map((n, i) => [norm(n), i]));
+    const meI = st.rows.findIndex(r => r.me || norm(r.name) === me);
+    if (meI < 0) return null;
+    const ours = new Map(ourRows.filter(r => !r.cup).map(r => [r.key, r]));
+    const G = games.map(f => {
+      const h = idx.get(norm(f.home)), a = idx.get(norm(f.away));
+      if (h == null || a == null) return null;
+      const o = ours.get(fixtureKey(f));
+      if (o) return { h, a, key: o.key, us: h === meI ? 'h' : 'a', n: o.n, m: o.m };
+      const p = simulate(sideFromHistory(f.home, false, fallbackZ), sideFromHistory(f.away, true, fallbackZ));
+      return { h, a, p };
+    }).filter(Boolean);
+    const N = SEASON_SIMS, n = names.length, up = st.up || 1, down = st.down || 0;
+    let seed = 7; const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
+    const U = Array.from({ length: N }, () => G.map(() => rnd()));
+    const tiebreak = st.rows.map(r => (r.gd || 0) * 1e-3 + (r.gf || 0) * 1e-6);
+    const posValue = pos => (pos < up ? POS_VALUE.promo : pos === 1 ? POS_VALUE.second : pos === 2 ? POS_VALUE.third : 0) + (down && pos >= n - down ? POS_VALUE.releg : 0);
+    const run = motsKeys => {
+      let v = 0; const pos = new Array(n).fill(0);
+      for (let s = 0; s < N; s++) {
+        const pts = st.rows.map((r, i) => r.pts + tiebreak[i]);
+        let motsLoss = 0;
+        G.forEach((g, j) => {
+          const u = U[s][j];
+          let w, d;
+          if (g.us) {
+            const r = motsKeys.has(g.key) ? g.m : g.n;
+            w = r.w; d = r.d;
+            const res = u < w ? 'W' : u < w + d ? 'D' : 'L';
+            if (res === 'L' && motsKeys.has(g.key)) motsLoss++;
+            const usI = g.us === 'h' ? g.h : g.a, them = g.us === 'h' ? g.a : g.h;
+            if (res === 'W') pts[usI] += 3; else if (res === 'D') { pts[usI]++; pts[them]++; } else pts[them] += 3;
+          } else {
+            w = g.p.w; d = g.p.d;
+            if (u < w) pts[g.h] += 3; else if (u < w + d) { pts[g.h]++; pts[g.a]++; } else pts[g.a] += 3;
+          }
+        });
+        const rank = pts.filter((p, i) => i !== meI && p > pts[meI]).length;
+        pos[rank]++;
+        v += posValue(rank) + PTS_VALUE * (pts[meI] - st.rows[meI].pts) - PTS_VALUE * MOTS_LOSS_COST * motsLoss;
+      }
+      return { v: v / N, pos: pos.map(c => c / N) };
+    };
+    const base = run(new Set());
+    const outlook = { promo: sum(base.pos.slice(0, up)), second: base.pos[1] || 0, top3: sum(base.pos.slice(0, 3)), releg: down ? sum(base.pos.slice(n - down)) : 0, games: G.length };
+    const cache = new Map();
+    const value = keys => { const k = [...keys].sort().join(','); if (!cache.has(k)) cache.set(k, run(keys).v); return cache.get(k); };
+    // a MOTS kept for the playoff: worth the swing on that one game times the chance we play it
+    const playoff = db.playoffs?.active && outlook.second > 0.1 ? { playoff: true, key: 'playoff', opp: 'promotion playoff', home: false, f: {}, value: outlook.second * PLAYOFF_SWING * POS_VALUE.promo } : null;
+    return { value, outlook, playoff };
   }
 
   function currentLineupEval(pool, oppSide, home, cal) {
@@ -2127,19 +2230,34 @@
     const b = plan.best, me = norm(db.me.name || '');
     const base = { style: b.style, passing: b.passing, attitude: 'Normal', atWon: b.ats?.won || 0, pref: plan.pref, shape: shapeKey(b.f) };
     const pts = r => 3 * r.w + r.d;
-    const zs = [toStars(zonesFor(b.xi), plan.cal), ...b.xi.map((x, i) => toStars(zonesFor(b.xi.map((y, j) => (j === i ? { ...y, score: y.score + 1 } : y))), plan.cal))];
+    // gains at +1, +3 and +6: attacks pile into a side's strongest lane, so a big upgrade in a weak lane is worth
+    // more than its +1 slope suggests (it pulls attacks there)
+    const zAt = (i, d) => toStars(zonesFor(b.xi.map((y, j) => (j === i ? { ...y, score: y.score + d } : y))), plan.cal);
+    const zs = [toStars(zonesFor(b.xi), plan.cal), ...IMPACT_STEPS.flatMap(d => b.xi.map((x, i) => zAt(i, d)))];
     const games = (db.fixtures?.list || []).filter(f => /Lg/i.test(f.type) && [norm(f.home), norm(f.away)].includes(me))
       .map(f => { const home = norm(f.home) === me; return { home, side: sideFromHistory(home ? f.away : f.home, home, b.z) }; })
       .filter(g => g.side.known);
     if (!games.length) games.push({ home: plan.home, side: plan.oppSide });
-    const raw = b.xi.map(() => 0);
+    const n = b.xi.length, gain = IMPACT_STEPS.map(() => b.xi.map(() => 0));
     for (const g of games) {
       const ref = pts(simulate({ ...base, home: g.home, z: zs[0] }, g.side));
-      b.xi.forEach((x, i) => (raw[i] += Math.max(1e-4, pts(simulate({ ...base, home: g.home, z: zs[i + 1] }, g.side)) - ref) / games.length));
+      IMPACT_STEPS.forEach((d, k) => b.xi.forEach((x, i) => (gain[k][i] += Math.max(1e-4 * d, pts(simulate({ ...base, home: g.home, z: zs[1 + k * n + i] }, g.side)) - ref) / games.length)));
     }
-    const mean = avg(raw);
-    return new Map(b.xi.map((x, i) => [x.slot, raw[i] / mean])); // 1 = average slot
+    const mean = avg(gain[0]);
+    const out = new Map(b.xi.map((x, i) => [x.slot, gain[0][i] / mean])); // 1 = average slot at +1
+    // per rating point for an upgrade of size d, relative to the average slot's +1 (piecewise linear in d)
+    const idx = new Map(b.xi.map((x, i) => [x.slot, i]));
+    out.at = (slot, d) => {
+      const i = idx.get(slot);
+      if (i == null) return 1;
+      const D = clamp(d, 1, IMPACT_STEPS[IMPACT_STEPS.length - 1]);
+      let k = 0; while (k < IMPACT_STEPS.length - 2 && D > IMPACT_STEPS[k + 1]) k++;
+      const [d0, d1] = [IMPACT_STEPS[k], IMPACT_STEPS[k + 1]], [g0, g1] = [gain[k][i], gain[k + 1][i]];
+      return (g0 + (g1 - g0) * (D - d0) / (d1 - d0)) / D / mean;
+    };
+    return out;
   }
+  const IMPACT_STEPS = [1, 3, 6];
 
   // Every listing evaluated at every XI slot of its own line, then the shortlists and a per-slot board.
   function recruitBoard(plan) {
@@ -2170,7 +2288,8 @@
     }
     // weight every gain by how much that slot moves results in this model, so priority positions lead
     const impact = slotImpact(plan);
-    for (const e of evals) { e.imp = impact.get(e.slot) || 1; e.w = e.d5 * e.imp; e.roi = e.cost > 0 ? e.w / (e.cost / 1e6) : e.w * 10; }
+    // weigh each upgrade at its own size (≈ the rating gap he opens on average over the horizon)
+    for (const e of evals) { e.imp = impact.at(e.slot, Math.max(1, e.d5 / HORIZON)); e.w = e.d5 * e.imp; e.roi = e.cost > 0 ? e.w / (e.cost / 1e6) : e.w * 10; }
     const bestPer = new Map();
     for (const e of evals) if (!bestPer.has(e.c.id) || e.w > bestPer.get(e.c.id).w) bestPer.set(e.c.id, e);
     const uniq = [...bestPer.values()].filter(e => e.d5 > 0.5 && e.wageOk && e.c.age <= MAX_BUY_AGE_ANY);
@@ -2756,12 +2875,24 @@
   // Every match report in the division (plus their cups/friendlies), at most once a day.
   async function crawlDivision(progress = () => {}) {
     const { doc } = await fetchDoc('/classificacao.asp');
+    parseStandingsPage(doc);
+    // playoffs (2nd vs the 7th/8th above) only run in countries with more than 3 divisions: the page lists
+    // every season that had them
+    if (!db.playoffs || now() - db.playoffs.at > 7 * 86400e3) {
+      try {
+        const { doc: pd } = await fetchDoc('/playoffs.asp?action=3');
+        const seasons = $$('option', pd).map(o => +(String(o.value).match(/[?&]e=(\d+)/) || [])[1]).filter(isFinite);
+        const cur = +(flatText(pd.body).match(/Season\s*(\d+)/) || [])[1];
+        db.playoffs = { last: seasons.length ? Math.max(...seasons) : null, season: cur || null, active: !!(seasons.length && cur && Math.max(...seasons) >= cur - 1), at: now() };
+      } catch { /* optional */ }
+    }
     const teams = [...new Map($$('a[href*="ver_equipa.asp?equipa="]', doc).map(a => [param(a.getAttribute('href'), 'equipa'), clean(a.textContent)])).entries()];
     for (const [id, name] of teams) {
       progress(`Division: ${name}…`);
       try { await grab(`/calendario.asp?action=equipa&equipa=${id}`, { teamName: name }); } catch { /* next team */ }
       const t = db.teams['t' + id];
       if (t && (!t.rosterAt || now() - t.rosterAt > 3 * 86400e3)) { try { await grab(`/ver_equipa.asp?equipa=${id}&vjog=1`, { teamName: name }); } catch { /* optional */ } }
+      if (t && (!t.botAt || now() - t.botAt > 7 * 86400e3)) { try { await grab(`/ver_equipa.asp?equipa=${id}`, { teamName: name }); } catch { /* optional */ } }
       await sleep(120);
     }
     const ids = new Set();
@@ -2796,13 +2927,18 @@
     if (games.length < MIN_CAL_GAMES) return null;
     const ll = P => games.reduce((s, r) => s + logPois(goalRate(r.sides[0].zones, r.sides[1].zones, r.sides[0].passing, P), r.score[0]) + logPois(goalRate(r.sides[1].zones, r.sides[0].zones, r.sides[1].passing, P), r.score[1]), 0);
     const grid = [];
-    for (const BASE of [4, 5, 6, 7, 8, 10]) for (const K_BEAT of [0.75, 1, 1.5, 2, 3]) for (const K_GK of [0.75, 1, 1.5, 2, 3]) for (const K_MID of [1, 2, 4, 8]) {
+    for (const BASE of [4, 5, 6, 7, 8, 10]) for (const K_BEAT of [0.5, 0.6, 0.75, 1, 1.5, 2, 3]) for (const K_GK of [0.75, 1, 1.25, 1.5, 2, 3]) for (const K_MID of [1, 2, 4, 8]) {
       const P = { BASE, K_BEAT, K_GK, K_MID, LANE_EXP: ME.LANE_EXP, LANE_MID: ME.LANE_MID }; // lanes come from learnLanes
       grid.push({ P, ll: ll(P) });
     }
     grid.sort((a, b) => b.ll - a.ll);
-    // the smoothest curves within 1 log-lik point of the best: as good, and far less overconfident
-    const pick = grid.filter(g => g.ll >= grid[0].ll - 1).sort((a, b) => b.P.K_BEAT - a.P.K_BEAT || b.P.K_GK - a.P.K_GK || b.P.K_MID - a.P.K_MID)[0];
+    // Likelihood-weighted average of the grid: smooth like a "robust" pick, without its lean. Taking the flattest
+    // curves near the best (the old rule) always flattened K_BEAT, which made defence worth half of attack —
+    // the reports show them close to even (+1 star: attack +0.7, opponent defence −0.6 log-goals).
+    const wsum = sum(grid.map(g => Math.exp(g.ll - grid[0].ll)));
+    const avgP = Object.fromEntries(['BASE', 'K_BEAT', 'K_GK', 'K_MID'].map(k => [k, +(sum(grid.map(g => Math.exp(g.ll - grid[0].ll) * g.P[k])) / wsum).toFixed(3)]));
+    const P1 = { ...avgP, LANE_EXP: ME.LANE_EXP, LANE_MID: ME.LANE_MID };
+    const pick = { P: P1, ll: ll(P1) };
     const mean = sum(games.map(r => r.score[0] + r.score[1])) / (2 * games.length);
     const llNull = sum(games.map(r => logPois(mean, r.score[0]) + logPois(mean, r.score[1])));
     const changed = ['BASE', 'K_BEAT', 'K_GK', 'K_MID'].some(k => pick.P[k] !== ME[k]);
@@ -3142,10 +3278,11 @@ input.txt{flex:1;height:26px;border:1px solid var(--line);background:var(--bg);c
   function attitudeTip(plan) {
     const M = plan.mots;
     if (!M) return 'Fixtures not read yet — MOTS plan needs the season calendar.';
-    const lab = r => `${r.home ? 'vs' : '@'} ${r.opp}${r.f.date ? ' (' + r.f.date + ')' : ''}`;
-    const plan2 = M.picks.length ? `Spend on: ${M.picks.map(r => `${lab(r)} +${r.gain.toFixed(2)} pts`).join(' · ')}.` : 'No remaining fixture where MOTS clearly pays.';
+    const lab = r => r.playoff ? 'the promotion playoff' : `${r.home ? 'vs' : '@'} ${r.opp}${r.bot === false ? ' (human)' : ''}${r.f.date ? ' (' + r.f.date + ')' : ''}`;
+    const O = M.outlook, out = O ? `Season outlook: promotion ${pct(O.promo)}, top 3 ${pct(O.top3)}${O.releg > 0.005 ? `, relegation ${pct(O.releg)}` : ''}${M.playoffs ? '' : ' (no promotion playoffs in this country)'}. ` : '';
+    const plan2 = M.picks.length ? `Spend on: ${M.picks.map(r => `${lab(r)} (≈ +${r.gain.toFixed(2)} pts of value)`).join(' · ')}.` : 'No remaining fixture where MOTS clearly pays — keep them.';
     const now = M.use ? `Using MOTS now${db.prefs.autoApply ? ' (set by the autopilot)' : ''}.` : 'Normal for this match.';
-    return `${now} Used ${M.used}/${MOTS_PER_SEASON} this season. ${plan2} Each is worth almost a star per zone; losing with it hurts morale, and players tire ~1% more.`;
+    return `${now} Used ${M.used}/${MOTS_PER_SEASON} this season. ${out}${plan2} Spent where it moves the final table most (rivals' head-to-heads count double); human opponents may answer with their own. Each is worth almost a star per zone; losing with it hurts morale, and players tire more.`;
   }
 
 
@@ -3499,5 +3636,5 @@ input.txt{flex:1;height:26px;border:1px solid var(--line);background:var(--bg);c
   setInterval(() => { if (!document.hidden || now() - (db.lastPilotAt || 0) > 3600e3) { db.lastPilotAt = now(); autoPilot().catch(e => console.warn('[PM Copilot] autopilot', e)); } }, 30 * 60e3);
   if (GM_getValue('pmc_open', false)) setOpen(true);
   if (window.__PMC_TEST) window.__PMC_TEST.version = VERSION;
-  if (window.__PMC_TEST) window.__PMC_TEST.api = { db: () => db, ingest, fetchDoc, grab, parseSkillPlayers, computePlan, trainingAdvice, clubAdvice, staffAdvice, scoutOpponent, refreshAll, calibration, snapshot, render, setOpen, planEvents, lectureChoice, autoPilot, applyOrders, autoEvents, autoLecture, autoRenew, autoTraining, trainingDue, verifyBoard, fetchValues, squadPool, withTalents, slotImpact, talentBonus, staffTrainingTarget, prep, rankCandidates, badgeMarketRows, valuePath, learn, calibrateModel, gradeMatches, learnSummary, recordGrowth, recordDecision, scanMarket, runScan, recruitBoard, fairPriceModel, searchUrl, specialityPlan, youthMoves, autoYouth, autoSpeciality, goalRate, motsPlan, learnShapes, learnRating, learnLanes, attackLanes, slotScore, zonesFor, toStars, calibration, ROLE_W };
+  if (window.__PMC_TEST) window.__PMC_TEST.api = { db: () => db, ingest, fetchDoc, grab, parseSkillPlayers, computePlan, trainingAdvice, clubAdvice, staffAdvice, scoutOpponent, refreshAll, calibration, snapshot, render, setOpen, planEvents, lectureChoice, autoPilot, applyOrders, autoEvents, autoLecture, autoRenew, autoTraining, trainingDue, verifyBoard, fetchValues, seasonTable, parseStandingsPage, squadPool, withTalents, slotImpact, talentBonus, staffTrainingTarget, prep, rankCandidates, badgeMarketRows, valuePath, learn, calibrateModel, gradeMatches, learnSummary, recordGrowth, recordDecision, scanMarket, runScan, recruitBoard, fairPriceModel, searchUrl, specialityPlan, youthMoves, autoYouth, autoSpeciality, goalRate, motsPlan, learnShapes, learnRating, learnLanes, attackLanes, slotScore, zonesFor, toStars, calibration, ROLE_W };
 })();

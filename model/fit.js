@@ -53,14 +53,17 @@ const ll = P => games.reduce((s, r) => s + [0, 1].reduce((t, i) => t + logPois(l
 const meanGoals = games.length ? games.reduce((s, r) => s + r.score[0] + r.score[1], 0) / (2 * games.length) : 1;
 const llNull = games.reduce((s, r) => s + logPois(meanGoals, r.score[0]) + logPois(meanGoals, r.score[1]), 0);
 const grid = [];
-for (const BASE of [4, 5, 6, 7, 8, 9, 10, 12]) for (const K_BEAT of [0.75, 1, 1.25, 1.5, 2, 2.5, 3]) for (const K_GK of [0.75, 1, 1.25, 1.5, 2, 3, 4, 6]) for (const K_MID of [1, 1.5, 2, 3, 4, 6, 8]) {
+for (const BASE of [4, 5, 6, 7, 8, 9, 10, 12]) for (const K_BEAT of [0.5, 0.6, 0.75, 1, 1.25, 1.5, 2, 2.5, 3]) for (const K_GK of [0.75, 1, 1.25, 1.5, 2, 3, 4, 6]) for (const K_MID of [1, 1.5, 2, 3, 4, 6, 8]) {
   const P = { BASE, K_BEAT, K_GK, K_MID };
   grid.push({ P, ll: games.length ? ll(P) : 0 });
 }
 grid.sort((a, b) => b.ll - a.ll);
 const best = grid[0];
-// Prefer the smoothest curves that are statistically as good (within 1 log-lik point): less overconfident.
-const robust = grid.filter(g => g.ll >= best.ll - 1).sort((a, b) => b.P.K_BEAT - a.P.K_BEAT || b.P.K_GK - a.P.K_GK || b.P.K_MID - a.P.K_MID)[0];
+// Likelihood-weighted average of the grid (same rule as calibrateModel in the script). The old "flattest within
+// 1 log-lik" pick always flattened K_BEAT and made defence worth half of attack; the reports show them near even.
+const wsum = grid.reduce((s, g) => s + Math.exp(g.ll - best.ll), 0);
+const avgP = Object.fromEntries(['BASE', 'K_BEAT', 'K_GK', 'K_MID'].map(k => [k, +(grid.reduce((s, g) => s + Math.exp(g.ll - best.ll) * g.P[k], 0) / wsum).toFixed(3)]));
+const robust = { P: avgP, ll: games.length ? ll(avgP) : 0 };
 const MIN_GAMES = 12;
 const params = games.length >= MIN_GAMES
   ? { ...robust.P, fittedOn: games.length, logLik: +robust.ll.toFixed(2), bestLogLik: +best.ll.toFixed(2), nullLogLik: +llNull.toFixed(2), best: best.P, fittedAt: new Date().toISOString() }
