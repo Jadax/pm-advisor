@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PM Copilot — Planetarium Manager assistant
 // @namespace    pm-copilot
-// @version      0.12.0
+// @version      0.13.0
 // @description  Opponent-aware tactics, match prep autopilot, training, transfers, finance and facilities for pmanager.org — learns from every match. Changelog: github.com/Jadax/pm-advisor
 // @author       Tushant Sharma
 // @license      MIT
@@ -23,7 +23,7 @@
 (() => {
   'use strict';
   if (window.top !== window.self) return;
-  const VERSION = '0.12.0';
+  const VERSION = '0.13.0';
   const PAGE = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
 
   /* =========================================================================
@@ -293,6 +293,14 @@
       if (!p) continue;
       p.tier = num(r.dataset.sq);
       p.toYouth = !!r.querySelector('a[href*="despromover"][href*="to=y"]');
+      // status icons (injury, suspension, unhappiness) and the game's Affected Quality
+      const st = $$('.sq-st [title]', r).map(i => i.getAttribute('title')).join(' · ');
+      p.status = st || null;
+      p.injuredDays = /injur/i.test(st) ? num((st.match(/(\d+)\s*day/i) || [])[1]) || 1 : 0;
+      p.suspended = /suspen|red card|banned/i.test(st);
+      p.unhappy = /unhappy/i.test(st);
+      p.q = num(r.dataset.q);
+      p.aq = num(r.querySelector('.sq-av .sq-gn')?.textContent);
     }
     const text = docText(doc.body);
     db.squad = { players, wagesSum: num((text.match(/Wages Sum\s*\$?\s*([\d.,]+)/i) || [])[1]), url: u.pathname + u.search, at: now() };
@@ -663,7 +671,8 @@
     }
     const g = k => (ft.match(new RegExp(k + '\\s+(' + DENOMS.slice().sort((a, b) => b.length - a.length).join('|') + ')', 'i')) || [])[1] || null;
     db.details[id] = {
-      form: g('Form'), experience: g('Experience'), professionalism: g('Professionalism'), penalties: g('Penalties'),
+      form: (ft.match(/\bForm\s+(Very Bad|Very Good|Bad|Normal|Good)/i) || [])[1] || null, experience: g('Experience'), professionalism: g('Professionalism'), penalties: g('Penalties'),
+      integration: g('Team Integration'),
       happiness: num((ft.match(/Happiness\s+(\d+)%/i) || [])[1]), health: num((ft.match(/Health\s+(\d+)%/i) || [])[1]),
       at: now(),
     };
@@ -955,11 +964,16 @@
     if (slot.line !== 'GK' && p.sides && !p.sides.includes(slot.lane)) f *= 0.9;
     return f;
   }
-  const fitFactor = fit => (!isFinite(fit) ? 1 : fit >= 90 ? 1 : fit >= 80 ? 0.97 : fit >= 50 ? 0.88 : 0.75);
-  // Form and experience feed the "global skill" — small, symmetric nudges around Good / Passable.
+  // Condition, fitted to the game's own "Affected Quality" (our 17 players, rmse 1.5%):
+  // AQ = Q · exp(0.040·form step + 0.029·experience grade − 0.33·(1 − happiness) − 0.47·(1 − fitness)).
+  // Form runs Very Bad…Very Good (centred on Normal); experience on the usual grades (centred on Passable).
+  const FORM_SCALE = ['Very Bad', 'Bad', 'Normal', 'Good', 'Very Good'];
+  const fitFactor = fit => (!isFinite(fit) ? 1 : Math.exp(-0.47 * (1 - Math.min(100, fit) / 100)));
   const formFactor = p => {
-    const f = denomIdx(p.form || ''), e = denomIdx(p.experience || '');
-    return (f >= 0 ? 1 + 0.02 * (f - 5) : 1) * (e >= 0 ? 1 + 0.012 * (e - 4) : 1);
+    const f = FORM_SCALE.findIndex(x => norm(x) === norm(p.form || '')), e = denomIdx(p.experience || '');
+    // one unhappy player in the fit; the manual calls the effect minor with a floor, so cap it
+    const h = isFinite(p.happiness) ? Math.max(-0.06, -0.33 * (1 - p.happiness / 100)) : 0;
+    return Math.exp((f >= 0 ? 0.04 * (f - 2) : 0) + (e >= 0 ? 0.029 * (e - 4) : 0) + h);
   };
   const slotScore = (p, slot) => roleSkill(p, slot.line) * posFactor(p, slot) * fitFactor(p.fit) * formFactor(p);
 
@@ -1172,6 +1186,90 @@
     });
     return Math.max(g, 1e-6);
   }
+  const shapeKey = f => (f?.D ? `${f.D.n}-${f.M.n}-${f.F.n}` : null);
+  const shapeFx = key => (key && db.model?.shapeFx?.[key]) || { att: 1, def: 1 };
+  // Team integration (manual §13–14): the starting eleven's average integration is worth 0.5–1 star on every
+  // zone. Our calibration reports were played by a mostly well-integrated XI (~Excellent), so shift from there.
+  const TI_STARS = 0.5;
+  const tiShift = xi => { const v = xi.map(x => denomIdx(x.p.integration || '')).filter(i => i >= 0); return v.length >= 8 ? TI_STARS * (avg(v) / 9 - 0.75) : 0; };
+  function addStars(z, d) {
+    if (!d) return z;
+    const o = { ...z, def: {}, mid: {}, att: {} };
+    for (const k of ['def', 'mid', 'att']) for (const l of LANES) o[k][l] = z[k][l] + d;
+    return o;
+  }
+  /* Our own player rating: how much secondaries and physicals count next to primaries in the match engine.
+   * Starts at the game's Quality weights (0.37 / 0.13 of a primary) and moves toward what our own reports show:
+   * each zone rating regressed on the average primary / secondary / physical skills of our players in it. */
+  const RATING_PRIOR = { sec: 0.37, phys: 0.13 };
+  const RATING_N0 = 300; // zone readings before the data outweighs the prior
+  function applyRating(r) {
+    for (const line of ['D', 'M', 'F']) {
+      const w = ROLE_W[line], ks = Object.keys(w);
+      const prim = ks.slice(0, 2), sec = ks.slice(2, 4), phys = ['SPE', 'STR']; // ROLE_W lists primaries first
+      const wp = 1 / (2 * (1 + r.sec + r.phys));
+      prim.forEach(k => (w[k] = +wp.toFixed(4))); sec.forEach(k => (w[k] = +(wp * r.sec).toFixed(4))); phys.forEach(k => (w[k] = +(wp * r.phys).toFixed(4)));
+    }
+  }
+  function learnRating() {
+    const me = norm(db.me.name || ''), sq = db.squad?.players || [];
+    const ZL = { def: 'D', mid: 'M', att: 'F' };
+    const X = [], y = [];
+    for (const r of Object.values(db.reports)) {
+      const s = r.sides?.find(x => norm(x.team) === me);
+      if (!s || !fullZones(s) || !s.players) continue;
+      const pos = s.players.filter(q => q.line && q.line !== 'GK');
+      for (const [zk, line] of Object.entries(ZL)) for (const l of LANES) {
+        const ps = pos.filter(q => q.line === line && (q.lane || 'C') === l).map(q => sq.find(x => x.id === q.id)).filter(Boolean);
+        if (!ps.length) continue;
+        const w = ROLE_W[line], ks = Object.keys(w);
+        const prim = ks.slice(0, 2), sec = ks.slice(2, 4);
+        const a = f => avg(ps.map(f));
+        X.push([zk === 'def' ? 1 : 0, zk === 'mid' ? 1 : 0, zk === 'att' ? 1 : 0, r.sides[0] === s ? 1 : 0, ps.length,
+          a(q => (q.sk[prim[0]] + q.sk[prim[1]]) / 2), a(q => (q.sk[sec[0]] + q.sk[sec[1]]) / 2), a(q => ((q.sk.SPE || 0) + (q.sk.STR || 0)) / 2)]);
+        y.push(s.zones[zk][l]);
+      }
+    }
+    if (X.length < 40) return null;
+    const k = X[0].length, A = Array.from({ length: k }, () => new Array(k).fill(0)), b = new Array(k).fill(0);
+    X.forEach((x, n) => { for (let i = 0; i < k; i++) { b[i] += x[i] * y[n]; for (let j = 0; j < k; j++) A[i][j] += x[i] * x[j]; } });
+    for (let i = 0; i < k; i++) {
+      let pv = i; for (let r = i + 1; r < k; r++) if (Math.abs(A[r][i]) > Math.abs(A[pv][i])) pv = r;
+      [A[i], A[pv]] = [A[pv], A[i]]; [b[i], b[pv]] = [b[pv], b[i]];
+      for (let r = i + 1; r < k; r++) { const f = A[r][i] / A[i][i]; for (let c = i; c < k; c++) A[r][c] -= f * A[i][c]; b[r] -= f * b[i]; }
+    }
+    const w = new Array(k).fill(0);
+    for (let i = k - 1; i >= 0; i--) w[i] = (b[i] - sum(A[i].slice(i + 1).map((a, j) => a * w[i + 1 + j]))) / A[i][i];
+    if (!(w[5] > 0)) return null;
+    const share = X.length / (X.length + RATING_N0);
+    // ≤ 0.5 each keeps primaries ≥ 0.25, which other code uses to tell main skills apart
+    const mix = (est, prior) => clamp((1 - share) * prior + share * clamp(est, 0, 0.8), 0, 0.5);
+    const rating = { sec: +mix(w[6] / w[5], RATING_PRIOR.sec).toFixed(3), phys: +mix(w[7] / w[5], RATING_PRIOR.phys).toFixed(3), n: X.length, rawSec: +(w[6] / w[5]).toFixed(2), rawPhys: +(w[7] / w[5]).toFixed(2), perPrim: +w[5].toFixed(3) };
+    db.model = { ...db.model, rating };
+    applyRating(rating);
+    save();
+    return rating;
+  }
+  // Each shape's goals for/against relative to the model across the division's reports, shrunk toward 1.
+  const SHAPE_PRIOR = 8; // goals of prior weight
+  function learnShapes() {
+    const games = Object.values(db.reports).filter(r => r.score && r.sides?.length === 2 && r.sides.every(fullZones));
+    const acc = {};
+    for (const r of games) r.sides.forEach((s, i) => {
+      const o = r.sides[1 - i];
+      const key = (String(s.formation || '').match(/^(\d)-(\d)-(\d)/) || []).slice(1).join('-');
+      if (!key) return;
+      const a = (acc[key] = acc[key] || { n: 0, gf: 0, ef: 0, ga: 0, ea: 0 });
+      a.n++;
+      a.gf += r.score[i]; a.ef += goalRate(s.zones, o.zones, s.passing, ME);
+      a.ga += r.score[1 - i]; a.ea += goalRate(o.zones, s.zones, o.passing, ME);
+    });
+    const fx = {};
+    for (const [k, a] of Object.entries(acc)) fx[k] = { n: a.n, att: +((a.gf + SHAPE_PRIOR) / (a.ef + SHAPE_PRIOR)).toFixed(3), def: +((a.ga + SHAPE_PRIOR) / (a.ea + SHAPE_PRIOR)).toFixed(3) };
+    db.model = { ...db.model, shapeFx: fx, shapesOn: games.length };
+    save();
+    return fx;
+  }
   function simulate(us, them) {
     const a = sideMult(us.z, us), b = sideMult(them.z, them);
     for (const l of LANES) {
@@ -1183,7 +1281,9 @@
       const d3 = clamp(a.n.M[l] - b.n.M[m], -3, 3);
       a.mid[l] *= 1 + 0.03 * d3; b.mid[m] *= 1 - 0.03 * d3;
     }
-    const xgFor = goalRate(a, b, us.passing, ME, us.pref), xgAg = goalRate(b, a, them.passing, ME, them.pref);
+    // what the zone ratings miss about each shape, learned from the division's reports (1 = none)
+    const fa = shapeFx(us.shape), fb = shapeFx(them.shape);
+    const xgFor = goalRate(a, b, us.passing, ME, us.pref) * fa.att * fb.def, xgAg = goalRate(b, a, them.passing, ME, them.pref) * fb.att * fa.def;
     return { xgFor, xgAg, poss: sigmoid((midOf(a) - midOf(b)) / ME.K_MID), ...wdl(xgFor, xgAg) };
   }
 
@@ -1206,13 +1306,16 @@
   function squadPool() {
     const tr = db.training?.rows || [];
     const ex = new Set(db.prefs.excluded || []);
-    return (db.squad?.players || []).filter(p => !ex.has(p.name) && p.tier !== 3).map(p => { // youth team can't play
+    // youth team can't play; injured (still out on match day) and suspended players aren't available
+    const days = db.next?.date ? Math.ceil((dmyMs(db.next.date) - now()) / 86400e3) : 0;
+    return (db.squad?.players || []).filter(p => !ex.has(p.name) && p.tier !== 3 && !p.suspended && !(p.injuredDays >= Math.max(1, days))).map(p => {
       const t = matchPlayer(p.name, tr, p.id);
       const d = db.details[p.id] || {};
-      return { ...p, fit: t?.fit, potential: t?.potential, quality: t?.quality, form: d.form, experience: d.experience, professionalism: d.professionalism, penalties: d.penalties, rate: playerRate(p.id, t?.potential).rate };
+      return { ...p, fit: t?.fit, potential: t?.potential, quality: t?.quality, form: d.form, experience: d.experience, professionalism: d.professionalism, penalties: d.penalties, happiness: d.happiness, integration: d.integration, rate: playerRate(p.id, t?.potential).rate };
     });
   }
 
+  const dmyMs = d => { const [dd, mm, yy] = String(d || '').split('/').map(Number); return yy ? new Date(yy < 100 ? 2000 + yy : yy, mm - 1, dd).getTime() : now(); };
   const dateKey = d => { if (!d) return 0; const [dd, mm, yy] = d.split('/').map(Number); return (yy || 0) * 10000 + (mm || 0) * 100 + (dd || 0); };
 
   // Everything we know about the opponent: real ME zone ratings from their reports, quality grades, ATs used.
@@ -1322,7 +1425,7 @@
     const refXI = bestXI(pool, formFromString('4-4-2'));
     const opp = opponentModel(cal, zonesFor(refXI));
     const home = db.next ? db.next.weAreHome !== false : true;
-    const oppSide = { z: opp?.z || toStars(zonesFor(refXI), cal), style: opp?.style || 'Normal', passing: opp?.passing || 'Short', home: !home, attitude: 'Normal', atWon: 0 };
+    const oppSide = { z: opp?.z || toStars(zonesFor(refXI), cal), style: opp?.style || 'Normal', passing: opp?.passing || 'Short', home: !home, attitude: 'Normal', atWon: 0, shape: shapeKey(opp?.form) };
     const pts = db.next?.points;
     // grade-based estimates need a clear margin; observed (scouted) skills only a small one for hidden decimals
     const safe = opp?.scoutedN >= 8 ? 0.05 : 0.15;
@@ -1330,12 +1433,12 @@
     for (const f of FORMATIONS) {
       const xi = bestXI(pool, f);
       if (!xi) continue;
-      const z = toStars(zonesFor(xi), cal);
+      const z = addStars(toStars(zonesFor(xi), cal), tiShift(xi));
       const at = opp?.xi ? evalATs(xi, opp.xi) : null;
       for (const style of STYLES) {
         const ats = decideATs(at, style, f, opp?.form, safe);
         for (const passing of PASSINGS) {
-          const r = simulate({ z, style, passing, home, attitude: 'Normal', atWon: ats?.won || 0 }, oppSide);
+          const r = simulate({ z, style, passing, home, attitude: 'Normal', atWon: ats?.won || 0, shape: shapeKey(f) }, oppSide);
           results.push({ f, xi, z, style, passing, ats, at, r, val: objectiveValue(r, db.prefs.objective, pts) });
         }
       }
@@ -1343,7 +1446,7 @@
     results.sort((a, b) => b.val - a.val);
     const best = results[0];
     // Preferred side: compare every option on the chosen setup.
-    const base = { z: best.z, style: best.style, passing: best.passing, home, atWon: best.ats?.won || 0, attitude: 'Normal' };
+    const base = { z: best.z, style: best.style, passing: best.passing, home, atWon: best.ats?.won || 0, attitude: 'Normal', shape: shapeKey(best.f) };
     const prefs = Object.keys(PREF_W).filter(k => k === 'Normal' || Object.keys(PREF_W[k]).every(l => best.f.M[l] + best.f.F[l] > 0))
       .map(k => ({ k, r: simulate({ ...base, pref: k }, oppSide) }))
       .sort((a, b) => objectiveValue(b.r, db.prefs.objective, pts) - objectiveValue(a.r, db.prefs.objective, pts));
@@ -1395,7 +1498,7 @@
     // the next fixture: first unplayed one against the next opponent (the pages name home/away differently)
     const nextF = oppNext && db.fixtures.list.find(f => !f.score && [norm(f.home), norm(f.away)].includes(oppNext));
     const nextK = nextF ? fixtureKey(nextF) : null;
-    const base = { z: plan.best.z, style: plan.best.style, passing: plan.best.passing, atWon: plan.best.ats?.won || 0, pref: plan.pref };
+    const base = { z: plan.best.z, style: plan.best.style, passing: plan.best.passing, atWon: plan.best.ats?.won || 0, pref: plan.pref, shape: shapeKey(plan.best.f) };
     const rows = db.fixtures.list.filter(f => !f.score && /Lg.|Cup/i.test(f.type) && [norm(f.home), norm(f.away)].includes(me)).map(f => {
       const key = fixtureKey(f), home = key === nextK ? plan.home : norm(f.home) === me, opp = norm(f.home) === me ? f.away : f.home;
       let side = key === nextK ? plan.oppSide : null;
@@ -1405,7 +1508,7 @@
         const form = formFromString(modeOf(h.slice(0, 5).map(x => x.formation)) || '4-4-2');
         z.n = { D: {}, M: {}, F: {} };
         for (const line of ['D', 'M', 'F']) for (const l of LANES) z.n[line][l] = form[line][l];
-        side = { z, style: modeOf(h.slice(0, 3).map(x => x.style)) || 'Normal', passing: modeOf(h.slice(0, 3).map(x => x.passing)) || 'Short', home: !home, attitude: 'Normal', atWon: 0 };
+        side = { z, style: modeOf(h.slice(0, 3).map(x => x.style)) || 'Normal', passing: modeOf(h.slice(0, 3).map(x => x.passing)) || 'Short', home: !home, attitude: 'Normal', atWon: 0, shape: shapeKey(form) };
       }
       const n = simulate({ ...base, home, attitude: 'Normal' }, side), m = simulate({ ...base, home, attitude: 'MOTS' }, side);
       const cup = /cup/i.test(f.type);
@@ -1935,7 +2038,7 @@
   // How much each XI slot matters in this match model: expected points gained from +1 rating there.
   function slotImpact(plan) {
     const b = plan.best;
-    const base = { style: b.style, passing: b.passing, home: plan.home, attitude: 'Normal', atWon: b.ats?.won || 0, pref: plan.pref };
+    const base = { style: b.style, passing: b.passing, home: plan.home, attitude: 'Normal', atWon: b.ats?.won || 0, pref: plan.pref, shape: shapeKey(b.f) };
     const pts = r => 3 * r.w + r.d;
     const ref = pts(simulate({ ...base, z: toStars(zonesFor(b.xi), plan.cal) }, plan.oppSide));
     const raw = b.xi.map((x, i) => {
@@ -2511,6 +2614,7 @@
   const MIN_CAL_GAMES = 30, MAX_REPORTS = 600, GROWTH_PRIOR_WEIGHT = 5;
   function applyModel(p) {
     for (const k of ['BASE', 'K_BEAT', 'K_GK', 'K_MID']) if (isFinite(p[k])) ME[k] = p[k];
+    if (p.rating) applyRating(p.rating);
     if (Array.isArray(p.growth) && p.growth.length === GROWTH.length) GROWTH.splice(0, GROWTH.length, ...p.growth);
   }
 
@@ -2683,7 +2787,8 @@
     recordGrowth();
     gradeMatches();
     progress('Calibrating…');
-    if (!db.model?.fittedAt || now() - db.model.fittedAt > 20 * 3600e3 || (db.model.fittedOn || 0) + 20 <= Object.keys(db.reports).length) calibrateModel();
+    if (!db.model?.fittedAt || now() - db.model.fittedAt > 20 * 3600e3 || (db.model.fittedOn || 0) + 20 <= Object.keys(db.reports).length) { learnRating(); calibrateModel(); learnShapes(); }
+    else if (!db.model?.shapeFx) learnShapes();
   }
   const today = () => new Date().toISOString().slice(0, 10);
 
@@ -2995,9 +3100,18 @@ input.txt{flex:1;height:26px;border:1px solid var(--line);background:var(--bg);c
     const yt = [
       ...Y.back.map(({ p, ok, why }) => ({ lvl: ok ? 'warn' : 'info', t: ok ? `${p.name} (${p.age}) isn't in the XI — back to the youth team for full training every league round${db.prefs.autoYouth ? ' (autopilot does it)' : ''}. He can be promoted again any time.` : `${p.name} (${p.age}) could go back to the youth team for full training, but stays: ${why}.` })),
       ...Y.bOld.map(p => ({ lvl: 'warn', t: `${p.name} is ${p.age} and in the B team — no positive training there from 22. Move him to the main squad.` })),
+      // manual §7: happiness drops when a better-than-average player gets <50% of minutes, wants a better wage,
+      // sits in the reserves, plays out of position twice running, is transfer-listed or plays tired; it rises
+      // 5%/day otherwise. 90%+ of the season's minutes or a wage 25% above his ask offsets the rest.
+      ...(db.squad.players || []).filter(p => p.unhappy || (isFinite(db.details[p.id]?.happiness) && db.details[p.id].happiness < 90)).map(p => {
+        const h = db.details[p.id]?.happiness, c = (db.contracts?.rows || []).find(x => x.id === p.id), starts = inXI.has(p.name);
+        const fix = [starts ? 'he is in the planned XI, so minutes will lift it' : 'give him starts (he needs over half the minutes if he is above the team average)', 'keep him in his own position and side', c?.wage && 'or renew him at 25%+ above his asked wage'].filter(Boolean).join('; ');
+        return { lvl: 'warn', t: `${p.name} is unhappy${isFinite(h) ? ` (${h}%)` : ''}: plays slightly worse (~${Math.round(Math.min(6, 33 * (1 - (h ?? 70) / 100)))}%) and will refuse a new contract. Fix: ${fix}. Recovers 5% a day once nothing is wrong.` };
+      }),
+      ...(db.squad.players || []).filter(p => p.injuredDays || p.suspended).map(p => ({ lvl: 'info', t: `${p.name}: ${p.status} — left out until available.` })),
       ...(Y.youth.length ? [{ lvl: 'info', t: `Youth team: ${Y.youth.map(p => `${surname(p.name)} (${p.age})`).join(', ')} — training at full league strength; they can't play until promoted (automatic at 19).` }] : []),
     ];
-    h += sec('tiers', 'Main · B · Youth', list(yt.length ? yt : [{ lvl: 'good', t: 'Everyone is in the right team.' }]) + '<div class="xs mut" style="margin-top:6px">Only the main squad plays matches (B-team players can be picked too). Youth team: academy players aged 17–18, no matches, full training every league round. B team: max 16, no matches of its own, reduced training, none from 22.</div>', { open: !!Y.back.some(m => m.ok) || !!Y.bOld.length });
+    h += sec('tiers', 'Availability · teams', list(yt.length ? yt : [{ lvl: 'good', t: 'Everyone is in the right team.' }]) + '<div class="xs mut" style="margin-top:6px">Only the main squad plays matches (B-team players can be picked too). Youth team: academy players aged 17–18, no matches, full training every league round. B team: max 16, no matches of its own, reduced training, none from 22.</div>', { open: yt.some(x => x.lvl === 'warn') });
     const rows = db.contracts?.rows || [];
     const starters = plannedStarters();
     const items = rows.filter(c => c.years <= 1 || c.wontRenew).map(c => {
@@ -3245,7 +3359,8 @@ input.txt{flex:1;height:26px;border:1px solid var(--line);background:var(--bg);c
     autoPilot().catch(e => console.warn('[PM Copilot] autopilot', e));
   }
   boot();
+  setInterval(() => { if (!document.hidden || now() - (db.lastPilotAt || 0) > 3600e3) { db.lastPilotAt = now(); autoPilot().catch(e => console.warn('[PM Copilot] autopilot', e)); } }, 30 * 60e3);
   if (GM_getValue('pmc_open', false)) setOpen(true);
   if (window.__PMC_TEST) window.__PMC_TEST.version = VERSION;
-  if (window.__PMC_TEST) window.__PMC_TEST.api = { db: () => db, ingest, fetchDoc, grab, parseSkillPlayers, computePlan, trainingAdvice, clubAdvice, staffAdvice, scoutOpponent, refreshAll, calibration, snapshot, render, setOpen, planEvents, lectureChoice, autoPilot, applyOrders, autoEvents, autoLecture, autoRenew, autoTraining, prep, rankCandidates, badgeMarketRows, valuePath, learn, calibrateModel, gradeMatches, learnSummary, recordGrowth, recordDecision, scanMarket, runScan, recruitBoard, fairPriceModel, searchUrl, specialityPlan, youthMoves, autoYouth, autoSpeciality, goalRate, motsPlan };
+  if (window.__PMC_TEST) window.__PMC_TEST.api = { db: () => db, ingest, fetchDoc, grab, parseSkillPlayers, computePlan, trainingAdvice, clubAdvice, staffAdvice, scoutOpponent, refreshAll, calibration, snapshot, render, setOpen, planEvents, lectureChoice, autoPilot, applyOrders, autoEvents, autoLecture, autoRenew, autoTraining, prep, rankCandidates, badgeMarketRows, valuePath, learn, calibrateModel, gradeMatches, learnSummary, recordGrowth, recordDecision, scanMarket, runScan, recruitBoard, fairPriceModel, searchUrl, specialityPlan, youthMoves, autoYouth, autoSpeciality, goalRate, motsPlan, learnShapes, learnRating, slotScore, zonesFor, toStars, calibration, ROLE_W };
 })();
