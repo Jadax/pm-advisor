@@ -2,6 +2,12 @@
 
 Newest first. Written by the daily review (and by hand) whenever the data changes the engine.
 
+## 2026-11-08 — no change (v0.14.0 stays)
+- **Data:** no fresh harvest (browser pane closed); local data unchanged since 01/11 — 99 reports, 2 decisions, 1 graded match (model Brier 0.001 vs pundits 0.639).
+- **Refit:** identical (robust BASE 6, K_BEAT 1.5, K_GK 1, K_MID 8; −253.6 vs −455.2 constant-rate).
+- **Not changed:** v0.13/v0.14 shipped today from in-browser data (availability, condition, rating ratios, shape and lane learning); nothing new offline to test them against. Weather still <30 games per condition; advanced tactics still confounded by team strength.
+- **Watch:** open the browser pane signed in to pmanager.org before the next run so the 07/11 Umtata game, the Cup QF and new rounds can be harvested and the v0.13/v0.14 changes graded.
+
 ## 2026-11-05 — no change (v0.12.0 stays)
 - **Data:** no fresh harvest (browser pane closed); local data unchanged since 01/11 — 99 reports, 2 decisions, 1 graded match (model Brier 0.001 vs pundits 0.639).
 - **Refit:** identical (robust BASE 6, K_BEAT 1.5, K_GK 1, K_MID 8; −253.6 vs −455.2 constant-rate).
