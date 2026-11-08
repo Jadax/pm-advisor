@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PM Copilot — Planetarium Manager assistant
 // @namespace    pm-copilot
-// @version      0.15.0
+// @version      0.15.1
 // @description  Opponent-aware tactics, match prep autopilot, training, transfers, finance and facilities for pmanager.org — learns from every match. Changelog: github.com/Jadax/pm-advisor
 // @author       Tushant Sharma
 // @license      MIT
@@ -23,7 +23,7 @@
 (() => {
   'use strict';
   if (window.top !== window.self) return;
-  const VERSION = '0.15.0';
+  const VERSION = '0.15.1';
   const PAGE = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
 
   /* =========================================================================
@@ -846,6 +846,7 @@
   ];
   function ingest(doc, url, ctx) {
     const u = new URL(url, location.origin);
+    readFunds(doc);
     for (const [re, fn] of ROUTES) {
       if (!re.test(u.pathname)) continue;
       try { return fn(doc, u, ctx); } catch (e) { console.warn('[PM Copilot]', fn.name, e); return null; }
@@ -865,7 +866,15 @@
     }
     const doc = new DOMParser().parseFromString(html, 'text/html');
     if (!/logout/i.test(html) && /type=["']?password/i.test(html)) throw new Error('Not logged in');
+    readFunds(doc);
     return { doc, url: res.url || url };
+  }
+  // Every page's sidebar shows today's funds; the finance page is only read at a full refresh.
+  function readFunds(doc) {
+    const v = num(doc.querySelector('td.team_players a[href*="financas.asp"] b')?.textContent);
+    if (!isFinite(v)) return;
+    db.me.funds = v;
+    if (db.economy) db.economy.funds = v;
   }
   async function grab(url, ctx) {
     const { doc, url: final } = await fetchDoc(url);
