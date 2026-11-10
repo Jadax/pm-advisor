@@ -2,6 +2,12 @@
 
 Newest first. Written by the daily review (and by hand) whenever the data changes the engine.
 
+## 2026-11-10 — no change (v0.17.0 stays)
+- **Data:** no fresh harvest (browser pane closed); local data unchanged since 01/11 — 99 reports, 2 decisions, 1 graded match (model Brier 0.001 vs pundits 0.639).
+- **Refit:** identical to v0.17.0's release (weighted BASE 5.95, K_BEAT 1.03, K_GK 1.32, K_MID 7.39; −253.4 vs −455.2 constant-rate).
+- **Not changed:** nothing new offline to test v0.17.0 against; weather still <30 games per condition, advanced tactics still confounded by team strength.
+- **Watch:** open the browser pane signed in to pmanager.org before the next run so the games since 01/11 can be harvested and v0.13–v0.17 graded.
+
 ## 2026-11-09 — v0.17.0 (defence valued properly; MOTS by the final table)
 - **Data:** 99 harvested division reports (198 performances). A Poisson fit of goals on zone stars: +1 star of our attack +0.213 ±0.033, +1 star of their defence −0.186 ±0.088, midfield +0.048, keeper −0.094 — attack and defence about even. The engine had attack +0.60 vs defence −0.31: its "robust" pick took the flattest K_BEAT within 1 log-lik of the best, and a flat K_BEAT makes defence matter little. That is why the transfer board kept recommending forwards.
 - **Changed:** calibrateModel / fit.js now use the likelihood-weighted average of the grid (K_BEAT 0.5 and 0.6 added). In-browser refit on 77 reports: K_BEAT 1.5 → 0.90, K_GK 1.30, BASE 5.07, K_MID 6.96; best fits put defence at −0.57…−0.82 per star vs attack +0.67…+0.84. Starting values updated.
