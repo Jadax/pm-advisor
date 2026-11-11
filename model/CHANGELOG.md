@@ -2,6 +2,12 @@
 
 Newest first. Written by the daily review (and by hand) whenever the data changes the engine.
 
+## 2026-11-11 — no change (v0.17.0 stays)
+- **Data:** no fresh harvest (browser pane closed); local data unchanged since 01/11 — 99 reports, 2 decisions, 1 graded match (model Brier 0.001 vs pundits 0.639).
+- **Refit:** identical (weighted BASE 5.95, K_BEAT 1.03, K_GK 1.32, K_MID 7.39; −253.4 vs −455.2 constant-rate).
+- **Fixed (offline only):** model/report.md described the released set as "smoothest within 1 log-lik" — it has been the likelihood-weighted grid average since v0.17.0. Script untouched, so no version bump.
+- **Watch:** 10 days without a harvest — open the browser pane signed in to pmanager.org before the next run so v0.13–v0.17 can be graded on real matches.
+
 ## 2026-11-10 — no change (v0.17.0 stays)
 - **Data:** no fresh harvest (browser pane closed); local data unchanged since 01/11 — 99 reports, 2 decisions, 1 graded match (model Brier 0.001 vs pundits 0.639).
 - **Refit:** identical to v0.17.0's release (weighted BASE 5.95, K_BEAT 1.03, K_GK 1.32, K_MID 7.39; −253.4 vs −455.2 constant-rate).

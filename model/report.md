@@ -1,6 +1,6 @@
 # PM Copilot model report
 
-Generated 2026-11-08 22:46 from 99 reports (99 with full zone ratings).
+Generated 2026-11-11 07:10 from 99 reports (99 with full zone ratings).
 
 ## Goal model
 
@@ -10,7 +10,7 @@ Generated 2026-11-08 22:46 from 99 reports (99 with full zone ratings).
 | Best fit | 6 | 1 | 1.25 | 8 | -253.12 |
 | Constant-rate baseline | | | | | -455.17 |
 
-Mean goals per team per game: 2.22. The released set is the smoothest one within 1 log-lik point of the best fit (less overconfident).
+Mean goals per team per game: 2.22. The released set is the likelihood-weighted average of the grid (less overconfident than the single best fit).
 
 ## Forecast grades
 

@@ -155,7 +155,7 @@ else {
   lines.push(`| **Released (robust)** | ${params.BASE} | ${params.K_BEAT} | ${params.K_GK} | ${params.K_MID} | ${params.logLik} |`);
   lines.push(`| Best fit | ${best.P.BASE} | ${best.P.K_BEAT} | ${best.P.K_GK} | ${best.P.K_MID} | ${best.ll.toFixed(2)} |`);
   lines.push(`| Constant-rate baseline | | | | | ${llNull.toFixed(2)} |`, '');
-  lines.push(`Mean goals per team per game: ${meanGoals.toFixed(2)}. The released set is the smoothest one within 1 log-lik point of the best fit (less overconfident).`, '');
+  lines.push(`Mean goals per team per game: ${meanGoals.toFixed(2)}. The released set is the likelihood-weighted average of the grid (less overconfident than the single best fit).`, '');
 }
 lines.push('## Forecast grades', '');
 if (!graded.length) lines.push('_No graded matches yet — each decision is graded once its report is harvested._', '');
