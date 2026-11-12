@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PM Copilot — Planetarium Manager assistant
 // @namespace    pm-copilot
-// @version      0.17.3
+// @version      0.17.4
 // @description  Opponent-aware tactics, match prep autopilot, training, transfers, finance and facilities for pmanager.org — learns from every match. Changelog: github.com/Jadax/pm-advisor
 // @author       Tushant Sharma
 // @license      MIT
@@ -23,7 +23,7 @@
 (() => {
   'use strict';
   if (window.top !== window.self) return;
-  const VERSION = '0.17.3';
+  const VERSION = '0.17.4';
   const PAGE = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
 
   /* =========================================================================
@@ -942,7 +942,7 @@
       }
     }
     for (const p of db.squad?.players || []) {
-      if (!p.id || (db.details[p.id] && 'talent' in db.details[p.id] && now() - db.details[p.id].at < 6 * 3600e3)) continue;
+      if (!p.id || (db.details[p.id] && 'talent' in db.details[p.id] && now() - db.details[p.id].at < 2 * 3600e3)) continue;
       progress(`Player ${p.name}…`);
       try { await grab('/ver_jogador.asp?jog_id=' + p.id); } catch (e) { /* non-critical */ }
       await sleep(120);
