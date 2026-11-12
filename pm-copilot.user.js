@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PM Copilot — Planetarium Manager assistant
 // @namespace    pm-copilot
-// @version      0.17.0
+// @version      0.17.1
 // @description  Opponent-aware tactics, match prep autopilot, training, transfers, finance and facilities for pmanager.org — learns from every match. Changelog: github.com/Jadax/pm-advisor
 // @author       Tushant Sharma
 // @license      MIT
@@ -23,7 +23,7 @@
 (() => {
   'use strict';
   if (window.top !== window.self) return;
-  const VERSION = '0.17.0';
+  const VERSION = '0.17.1';
   const PAGE = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
 
   /* =========================================================================
@@ -2260,6 +2260,7 @@
   const IMPACT_STEPS = [1, 3, 6];
 
   // Every listing evaluated at every XI slot of its own line, then the shortlists and a per-slot board.
+  const MIN_UPGRADE_NOW = 0.5; // rating points over the starter today
   function recruitBoard(plan) {
     if (!plan?.best) return null;
     const listings = Object.values(db.scan?.rows || {});
@@ -2292,7 +2293,8 @@
     for (const e of evals) { e.imp = impact.at(e.slot, Math.max(1, e.d5 / HORIZON)); e.w = e.d5 * e.imp; e.roi = e.cost > 0 ? e.w / (e.cost / 1e6) : e.w * 10; }
     const bestPer = new Map();
     for (const e of evals) if (!bestPer.has(e.c.id) || e.w > bestPer.get(e.c.id).w) bestPer.set(e.c.id, e);
-    const uniq = [...bestPer.values()].filter(e => e.d5 > 0.5 && e.wageOk && e.c.age <= MAX_BUY_AGE_ANY);
+    // an upgrade must beat the starter today (promotion push: no buying on projected growth alone)
+    const uniq = [...bestPer.values()].filter(e => e.d5 > 0.5 && e.dNow >= MIN_UPGRADE_NOW && e.wageOk && e.c.age <= MAX_BUY_AGE_ANY);
     const within = cap => uniq.filter(e => e.expPrice <= cap);
     // the cream only: highest first, one per position, nobody twice
     const taken = new Set();
@@ -2316,7 +2318,7 @@
     const bids = pick(uniq.filter(e => !e.c.free && (e.c.price || 0) <= caps.max && e.expPrice > caps.max && e.c.age <= maxAge)
       .map(e => Object.assign(e, { chance: winChance(caps.max, e.value || (e.fair && fair?.byValue ? e.fair : 0)) })).filter(e => e.chance >= 0.15), e => e.w * e.chance, 3);
     const slots = ours.map(o => {
-      const forSlot = evals.filter(e => e.slot === o.x.slot && e.d5 > 0.5 && e.wageOk && e.c.age <= MAX_BUY_AGE_ANY && e.expPrice <= caps.max);
+      const forSlot = evals.filter(e => e.slot === o.x.slot && e.d5 > 0.5 && e.dNow >= MIN_UPGRADE_NOW && e.wageOk && e.c.age <= MAX_BUY_AGE_ANY && e.expPrice <= caps.max);
       const one = (key, ok = () => true) => forSlot.filter(ok).sort((a, b) => key(b) - key(a))[0] || null;
       return { slot: o.x.slot, starter: o.x.p, ov: o.v, imp: impact.get(o.x.slot) || 1, best: one(e => e.w, e => e.c.age <= maxAge), value: one(e => e.roi) };
     }).sort((a, b) => b.imp - a.imp);
@@ -2544,6 +2546,15 @@
       res = await withFrame(db.next.ordersUrl, lineupReady, async ctx => { ordersContext(ctx.doc); return run(ctx); });
     }
     p.orders = { sig, at: now(), saved: res.saved, failed: res.failed };
+    // The game plays Default Orders whenever a match has none saved — so when the autopilot misses a match (no tab
+    // open) the fallback is our latest plan, not an old manual lineup. Never MOTS there.
+    if (res.saved && db.defaultOrdersSig !== sig) {
+      try {
+        const dplan = { ...plan, mots: plan.mots && { ...plan.mots, use: false } };
+        const d = await withFrame('/titulares_v3.asp', lineupReady, async ctx => (ordersContext(ctx.doc).isDefault ? { ...applyPlan(dplan, ctx), saved: await saveOrders(ctx) } : { saved: false }));
+        if (d.saved) { db.defaultOrdersSig = sig; logAction('orders', 'Default orders set to the same plan (used for any match without its own orders)'); }
+      } catch (e) { logAction('orders', 'Default orders not updated: ' + e.message, false); }
+    }
     // count our own MOTS: the reports don't show it, and the page's choice can still change until kick-off
     if (res.saved && plan.mots?.nextKey && db.mots) {
       db.mots.used = db.mots.used.filter(k => k !== plan.mots.nextKey);
@@ -3471,7 +3482,7 @@ input.txt{flex:1;height:26px;border:1px solid var(--line);background:var(--bg);c
       const sg = v => `${v >= 0 ? '+' : ''}${f1(v)}`;
       const money = v => (v >= 1e6 ? `$${(v / 1e6).toFixed(2)}M` : `$${Math.round(v / 1e3)}k`);
       const tag = e => [e.c.free ? chip('free agent', 'g') : '', e.c.age >= 30 ? chip('short-term', 'w') : '', e.cheap && e.cheap >= 1.4 ? chip('game undervalues him', 'g') : '', !e.c.free && !e.value ? chip('value unknown', 'w') : ''].join('');
-      const row = e => `<tr title="${esc(`vs ${e.vs.name}: now ${f1(e.ov.now)}, at 26 ${f1(e.ov.at26)}`)}"><td><a href="/ver_jogador.asp?jog_id=${esc(e.c.id)}" style="color:inherit;font-weight:600">${esc(e.c.name)}</a><div class="xs mut">${e.c.age} · ${esc(e.c.line)}${esc(e.c.sides || '')} · ${esc(e.c.quality || '?')}/${esc(e.c.potential || '?')}${e.c.talent ? ' · ' + esc(e.c.talent) : ''}${e.c.deadline ? ' · ends ' + esc(e.c.deadline.slice(0, 8)) : ''}</div>${tag(e) ? `<div style="margin-top:2px">${tag(e)}</div>` : ''}</td><td>${chip(e.slot.code)}<div class="xs mut">${esc(surname(e.vs.name))}</div></td><td class="n"><b style="color:var(--good)">${sg(e.d5)}</b><div class="xs mut">now ${sg(e.dNow)}</div></td><td class="n" title="Expected winning bid: the ask (an auction floor) or about half his Value — what completed transfers typically went for. Free agents: 12-week signing fee.">≈${money(e.expPrice)}<div class="xs mut">${e.c.free ? 'signing fee' : `ask ${money(e.c.price || 0)}${e.value ? ` · value ${money(e.value)}` : ''}`}${e.c.wage ? ` · ${money(e.c.wage)}/wk` : ''}</div></td></tr>`;
+      const row = e => `<tr title="${esc(`vs ${e.vs.name}: now ${f1(e.ov.now)}, at 26 ${f1(e.ov.at26)}`)}"><td><a href="/ver_jogador.asp?jog_id=${esc(e.c.id)}" style="color:inherit;font-weight:600">${esc(e.c.name)}</a><div class="xs mut">${e.c.age} · ${esc(e.c.line)}${esc(e.c.sides || '')} · ${esc(e.c.quality || '?')}/${esc(e.c.potential || '?')}${e.c.talent ? ' · ' + esc(e.c.talent) : ''}${e.c.deadline ? ' · ends ' + esc(e.c.deadline.slice(0, 8)) : ''}</div>${tag(e) ? `<div style="margin-top:2px">${tag(e)}</div>` : ''}</td><td>${chip(e.slot.code)}<div class="xs mut">${esc(surname(e.vs.name))}</div></td><td class="n"><b style="color:var(--good)">${sg(e.d5)}</b><div class="xs mut">now ${f1(e.v.now)} vs ${f1(e.ov.now)}</div></td><td class="n" title="Expected winning bid: the ask (an auction floor) or about half his Value — what completed transfers typically went for. Free agents: 12-week signing fee.">≈${money(e.expPrice)}<div class="xs mut">${e.c.free ? 'signing fee' : `ask ${money(e.c.price || 0)}${e.value ? ` · value ${money(e.value)}` : ''}`}${e.c.wage ? ` · ${money(e.c.wage)}/wk` : ''}</div></td></tr>`;
       const tbl = arr => (arr.length ? `<table><tr><th>Player</th><th>As</th><th class="n">5 seasons</th><th class="n">Expect</th></tr>${arr.map(row).join('')}</table>` : '<div class="sm mut">Nothing that improves your XI at this price yet.</div>');
       h += sec('recruit', 'Recruitment', `<div class="row sp wr"><span class="sm">Funds <b>${money(B.caps.funds)}</b> · up to <b>${money(B.caps.max)}</b> per player</span><span class="seg">${[0.2, 0.35, 0.5].map(p => `<button data-buypct="${p}" class="${Math.abs(B.caps.pct - p) < 0.01 ? 'on' : ''}">${Math.round(p * 100)}%</button>`).join('')}</span></div>
         <div class="row" style="margin-top:6px"><button class="btn p" data-act="scan" ${busy ? 'disabled' : ''}>${B.scannedAt ? 'Rescan market' : 'Scan market'}</button><span class="xs mut">${B.n} live listings${B.scannedAt ? ' · ' + ago(B.scannedAt) : ''}</span></div>
@@ -3481,7 +3492,7 @@ input.txt{flex:1;height:26px;border:1px solid var(--line);background:var(--bg);c
       h += sec('rvalue', 'Best value', tbl(B.value) + '<div class="xs mut" style="margin-top:6px">Most upgrade per $1M of <b>net</b> cost — the fee minus what he still sells for in 3 seasons (young players keep their value, 30+ lose it), plus a season of wages. Free agents and short-term fixes (30–31) included; nobody likely to retire before next season — this season only counts for the rounds left.</div>', { right: 'return per $' });
       if (B.bids?.length) h += sec('rbids', 'Bid up to your cap', tbl(B.bids) + `<div class="xs mut" style="margin-top:6px">Their ask fits your cap but auctions usually end higher (≈ half the Value). Bid at most ${money(B.caps.max)}: ${B.bids.map(e => `${esc(surname(e.c.name))} ~${Math.round(e.chance * 100)}%`).join(' · ')} chance to win at that price.</div>`, { right: 'chance at cap' });
       if (B.stretch.length) h += sec('rstretch', 'Worth saving for', tbl(B.stretch) + '<div class="xs mut" style="margin-top:6px">Bigger long-term upgrades above your cap (under 30).</div>', { right: `> ${money(B.caps.max)}`, open: false });
-      h += sec('rslots', 'By position', `<table><tr><th>Slot</th><th>Starter</th><th>Best</th><th>Value</th></tr>${B.slots.map(s => `<tr><td>${chip(s.slot.code)}<div class="xs mut" title="How much this slot decides matches (1 = average)">×${s.imp.toFixed(1)}</div></td><td class="xs">${esc(surname(s.starter.name))}<div class="mut">${f1(s.ov.now)} → ${f1(s.ov.at26)}</div></td>${[s.best, s.value].map(e => `<td class="xs">${e ? `<a href="/ver_jogador.asp?jog_id=${esc(e.c.id)}" style="color:inherit;font-weight:600">${esc(surname(e.c.name))}</a> <span style="color:var(--good)">${sg(e.d5)}</span><div class="mut">${e.c.age}y · ≈${money(e.expPrice)}</div>` : '<span class="mut">—</span>'}</td>`).join('')}</tr>`).join('')}</table><div class="xs mut" style="margin-top:6px">Ordered by how much each position decides matches in the current model (×1 = average).</div>`, { open: false });
+      h += sec('rslots', 'By position', `<table><tr><th>Slot</th><th>Starter</th><th>Best</th><th>Value</th></tr>${B.slots.map(s => `<tr><td>${chip(s.slot.code)}<div class="xs mut" title="How much this slot decides matches (1 = average)">×${s.imp.toFixed(1)}</div></td><td class="xs">${esc(surname(s.starter.name))}<div class="mut">${f1(s.ov.now)} → ${f1(s.ov.at26)}</div></td>${[s.best, s.value].map(e => `<td class="xs">${e ? `<a href="/ver_jogador.asp?jog_id=${esc(e.c.id)}" style="color:inherit;font-weight:600">${esc(surname(e.c.name))}</a> <span style="color:var(--good)">${sg(e.d5)}</span><div class="mut">now ${f1(e.v.now)} vs ${f1(e.ov.now)} · ${e.c.age}y · ≈${money(e.expPrice)}</div>` : '<span class="mut">—</span>'}</td>`).join('')}</tr>`).join('')}</table><div class="xs mut" style="margin-top:6px">Ordered by how much each position decides matches in the current model (×1 = average).</div>`, { open: false });
     }
     if (db.market?.rows?.length) {
       const ranked = rankCandidates(db.market.rows, plan);

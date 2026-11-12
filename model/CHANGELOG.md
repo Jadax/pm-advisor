@@ -2,7 +2,11 @@
 
 Newest first. Written by the daily review (and by hand) whenever the data changes the engine.
 
-## 2026-11-12 — no change (v0.17.0 stays)
+## 2026-11-12 — v0.17.1 (lineups reach the game; upgrades must be better today)
+- **Found:** Brekhun (bought on the board's advice) started none of the last 6 matches (28/10–11/11). The engine planned him at RF (13.2 vs Zottelin 10.6 there — Zottelin is left-sided and in Very Bad form), but the lineups played were the game's **Default Orders**: an old manual 3-4-3 with Zottelin RF and Brekhun on the bench. The game uses them for any match without its own saved orders, i.e. whenever the autopilot didn't run before kick-off (no pmanager tab open). Run here, the autopilot saved the match orders fine. Brekhun is now "Currently Unhappy" — no minutes is one of the manual's causes.
+- **Changed:** after saving a match's orders the autopilot also writes the same plan (without MOTS) to Default Orders, so a missed match falls back to the latest plan.
+- **Transfers:** picks had to beat the starter only over 5 seasons (projected growth), so a weaker player could show as an upgrade. Now every pick must be at least +0.5 rating better than the starter today; the board shows both ratings. Today: e.g. Bal 17.4 vs Farag 14.5 (CM), Opaliński 17.5 vs Šeremet 14.1 (CF), Boughara 17.7 vs Mohd 16.0 (RB); nothing at GK/LB/CD beats Baez/Andrijanić/Santos/Kesici within budget.
+no change (v0.17.0 stays)
 - **Data:** no fresh harvest (browser pane closed); local data unchanged since 01/11 — 99 reports, 2 decisions, 1 graded match (model Brier 0.001 vs pundits 0.639).
 - **Refit:** identical to 11/11 (weighted BASE 5.95, K_BEAT 1.03, K_GK 1.32, K_MID 7.39; −253.4 vs −455.2 constant-rate). Only timestamps in params.json/report.md moved.
 - **Not changed:** no new evidence; weather still <30 games per condition, advanced tactics still confounded by team strength. The script keeps learning in the user's browser regardless.
