@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PM Copilot — Planetarium Manager assistant
 // @namespace    pm-copilot
-// @version      0.17.4
+// @version      0.18.0
 // @description  Opponent-aware tactics, match prep autopilot, training, transfers, finance and facilities for pmanager.org — learns from every match. Changelog: github.com/Jadax/pm-advisor
 // @author       Tushant Sharma
 // @license      MIT
@@ -23,7 +23,7 @@
 (() => {
   'use strict';
   if (window.top !== window.self) return;
-  const VERSION = '0.17.4';
+  const VERSION = '0.18.0';
   const PAGE = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
 
   /* =========================================================================
@@ -2490,6 +2490,40 @@
     if (nextOpt && db.next) db.next.ordersUrl = '/' + nextOpt.value.replace(/^\//, '');
     return { label, isDefault: /default/i.test(label), forNext: !!opp && norm(label).includes(norm(opp)) };
   }
+  /* Every later match listed in Starting Eleven gets its own orders against its own opponent (from their reports),
+   * so a match the autopilot can't reach in time (no tab open) still plays an opponent-specific lineup and
+   * Advanced Options — not Default Orders. No MOTS here: when a match becomes the next one it is re-planned with
+   * scouting, weather and the MOTS plan. */
+  async function applyUpcoming() {
+    const { doc } = await fetchDoc('/titulares_v3.asp');
+    const sel = doc.querySelector('select[name="lista_j"]');
+    const me = db.me.name || '';
+    const nextOpp = opponentName();
+    const games = Array.from(sel?.options || []).map(o => ({ url: '/' + o.value.replace(/^\//, ''), m: clean(o.textContent).match(/^vs\s+(.+?)\s+@\s+([\d/]+)\s*\((H|A)\)/) }))
+      .filter(g => g.m && /jogo_id=/.test(g.url) && norm(g.m[1]) !== norm(nextOpp || ''));
+    const keep = db.next, out = [];
+    try {
+      for (const g of games) {
+        const [, opp, date, ha] = g.m, home = ha === 'H';
+        db.next = { home: home ? me : opp, away: home ? opp : me, date, weAreHome: home, comp: 'League', ordersUrl: g.url };
+        planCache = { v: -1, plan: null };
+        const plan = computePlan();
+        if (plan.error) continue;
+        const key = matchKey();
+        const sig = planSignature({ ...plan, mots: null });
+        db.prep = db.prep || {};
+        const p = (db.prep[key] = db.prep[key] || {});
+        if (p.early?.sig === sig || p.orders?.saved) continue; // up to date, or already done as the next match
+        const dplan = { ...plan, mots: plan.mots && { ...plan.mots, use: false } };
+        const res = await withFrame(g.url, lineupReady, async ctx => { const r = applyPlan(dplan, ctx); return { ...r, saved: r.xiOk ? await saveOrders(ctx) : false }; });
+        p.early = { sig, at: now(), saved: res.saved };
+        out.push(`${opp} (${date}): ${formLabel(plan.best.f)} ${plan.best.style}/${plan.best.passing}${res.saved ? '' : ' — not saved'}`);
+        await sleep(150);
+      }
+    } finally { db.next = keep; planCache = { v: -1, plan: null }; save(); }
+    if (out.length) logAction('orders', 'Later matches: ' + out.join(' · '));
+    return out;
+  }
   const planSignature = plan => JSON.stringify([formDetail(plan.best.f), plan.best.xi.map(x => x.p.id), plan.best.style, plan.best.passing, plan.best.ats, plan.pref, !!plan.mots?.use]);
   const matchKey = () => (db.next ? `${db.next.date}|${db.next.home}|${db.next.away}` : null);
   const prep = () => { const k = matchKey(); db.prep = db.prep || {}; return k ? (db.prep[k] = db.prep[k] || {}) : {}; };
@@ -3108,7 +3142,12 @@
       if (db.prefs.autoLearn && (!db.scan?.at || now() - db.scan.at > 12 * 3600e3)) await step('Market scan', () => runScan(setStatus));
       else if (db.prefs.autoLearn && db.scan && now() - (db.scan.verifiedAt || 0) > 2 * 3600e3) await step('Checking shortlist', () => verifyBoard(setStatus));
       if (db.prefs.autoYouth && (!db.youthCheckedAt || now() - db.youthCheckedAt > 12 * 3600e3)) await step('Youth team', autoYouth); // before orders: it changes who is available
+      // a signing (or sale) must reach the plan before orders are made: squad at most 30 min old, and a new
+      // player's own page (form, talent, integration) read at once
+      if (!db.squad?.at || now() - db.squad.at > 30 * 60e3) await step('Squad', () => grab(PAGES.squad()));
+      for (const p of (db.squad?.players || []).filter(p => p.id && p.tier !== 3 && !db.details[p.id])) { await step('New player', () => grab('/ver_jogador.asp?jog_id=' + p.id)); await sleep(120); }
       if (db.next && db.prefs.autoApply) await step('Match orders', () => applyOrders({ force: forceOrders }));
+      if (db.next && db.prefs.autoApply && db.prefs.autoSave) await step('Later matches', applyUpcoming);
       if (db.next) recordDecision();
       if (db.next && db.prefs.autoEvents) await step('Match events', autoEvents);
       if (db.next && db.prefs.autoLecture) await step('Lecture', autoLecture);
@@ -3674,5 +3713,5 @@ input.txt{flex:1;height:26px;border:1px solid var(--line);background:var(--bg);c
   setInterval(() => { if (!document.hidden || now() - (db.lastPilotAt || 0) > 3600e3) { db.lastPilotAt = now(); autoPilot().catch(e => console.warn('[PM Copilot] autopilot', e)); } }, 30 * 60e3);
   if (GM_getValue('pmc_open', false)) setOpen(true);
   if (window.__PMC_TEST) window.__PMC_TEST.version = VERSION;
-  if (window.__PMC_TEST) window.__PMC_TEST.api = { db: () => db, ingest, fetchDoc, grab, parseSkillPlayers, computePlan, trainingAdvice, clubAdvice, staffAdvice, scoutOpponent, refreshAll, calibration, snapshot, render, setOpen, planEvents, lectureChoice, autoPilot, applyOrders, autoEvents, autoLecture, autoRenew, autoTraining, trainingDue, verifyBoard, fetchValues, seasonTable, parseStandingsPage, squadPool, withTalents, slotImpact, talentBonus, staffTrainingTarget, prep, rankCandidates, badgeMarketRows, valuePath, learn, calibrateModel, gradeMatches, learnSummary, recordGrowth, recordDecision, scanMarket, runScan, recruitBoard, fairPriceModel, searchUrl, specialityPlan, youthMoves, autoYouth, autoSpeciality, goalRate, motsPlan, learnShapes, learnRating, learnLanes, attackLanes, slotScore, zonesFor, toStars, calibration, ROLE_W };
+  if (window.__PMC_TEST) window.__PMC_TEST.api = { db: () => db, ingest, fetchDoc, grab, parseSkillPlayers, computePlan, trainingAdvice, clubAdvice, staffAdvice, scoutOpponent, refreshAll, calibration, snapshot, render, setOpen, planEvents, lectureChoice, autoPilot, applyOrders, autoEvents, autoLecture, autoRenew, autoTraining, trainingDue, applyUpcoming, verifyBoard, fetchValues, seasonTable, parseStandingsPage, squadPool, withTalents, slotImpact, talentBonus, staffTrainingTarget, prep, rankCandidates, badgeMarketRows, valuePath, learn, calibrateModel, gradeMatches, learnSummary, recordGrowth, recordDecision, scanMarket, runScan, recruitBoard, fairPriceModel, searchUrl, specialityPlan, youthMoves, autoYouth, autoSpeciality, goalRate, motsPlan, learnShapes, learnRating, learnLanes, attackLanes, slotScore, zonesFor, toStars, calibration, ROLE_W };
 })();
