@@ -2,6 +2,11 @@
 
 Newest first. Written by the daily review (and by hand) whenever the data changes the engine.
 
+## 2026-11-12 — v0.17.2 (accidental exclusions; orders re-read after saving)
+- **Found:** the 14/11 orders were re-saved by the user's own copy as 4-3-3 Attacking/Short with Rymarz, Preto, Zottelin up front, Pinto RB, Mohd CD, Zonal marking, no One-on-Ones. Recomputing the plan with Brekhun, Šeremet and Kesici marked unavailable reproduces exactly that XI and those options. In the Squad tab, tapping a row marked a player unavailable — for good, with only a faded row to show for it.
+- **Changed:** old marks are cleared once (listed in the Match tab); "out" is now an explicit button that lasts until the end of the next match day; the Match tab lists who is left out by hand with a "back" button. After saving, the autopilot re-reads the match's orders and checks the XI and style/passing against the plan ("saved and checked", or a ✗ entry naming what differs). The log line now lists the XI.
+- **Checked:** one Save stores the lineup and Advanced Options together; re-read after saving 14/11: Baez, Andrijanić, Santos, Kesici, Mohd, Emerson, Farag, Šustek, Preto, Šeremet, Brekhun · Attacking / Short Passing.
+
 ## 2026-11-12 — v0.17.1 (lineups reach the game; upgrades must be better today)
 - **Found:** Brekhun (bought on the board's advice) started none of the last 6 matches (28/10–11/11). The engine planned him at RF (13.2 vs Zottelin 10.6 there — Zottelin is left-sided and in Very Bad form), but the lineups played were the game's **Default Orders**: an old manual 3-4-3 with Zottelin RF and Brekhun on the bench. The game uses them for any match without its own saved orders, i.e. whenever the autopilot didn't run before kick-off (no pmanager tab open). Run here, the autopilot saved the match orders fine. Brekhun is now "Currently Unhappy" — no minutes is one of the manual's causes.
 - **Changed:** after saving a match's orders the autopilot also writes the same plan (without MOTS) to Default Orders, so a missed match falls back to the latest plan.

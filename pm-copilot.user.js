@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PM Copilot — Planetarium Manager assistant
 // @namespace    pm-copilot
-// @version      0.17.1
+// @version      0.17.2
 // @description  Opponent-aware tactics, match prep autopilot, training, transfers, finance and facilities for pmanager.org — learns from every match. Changelog: github.com/Jadax/pm-advisor
 // @author       Tushant Sharma
 // @license      MIT
@@ -23,7 +23,7 @@
 (() => {
   'use strict';
   if (window.top !== window.self) return;
-  const VERSION = '0.17.1';
+  const VERSION = '0.17.2';
   const PAGE = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
 
   /* =========================================================================
@@ -111,6 +111,9 @@
   try { db = Object.assign(blankDb(), JSON.parse(GM_getValue(KEY, '{}'))); } catch { db = blankDb(); }
   db.prefs = Object.assign(blankDb().prefs, db.prefs);
   if (!db.prefs.autoSaveDefaulted) { db.prefs.autoSave = true; db.prefs.autoSaveDefaulted = true; } // auto-save became the default in 0.3.0
+  // 0.17.2: "unavailable" marks were set by tapping a squad row and never expired — Brekhun, Šeremet and Kesici sat
+  // out for weeks that way. Old marks are cleared once (and shown); new ones last until the next match.
+  if (!db.prefs.outMigrated) { if ((db.prefs.excluded || []).length) db.clearedOut = db.prefs.excluded; db.prefs.excluded = []; db.prefs.out = {}; db.prefs.outMigrated = true; }
   let dataVersion = 0;
   const save = () => { dataVersion++; GM_setValue(KEY, JSON.stringify(db)); };
 
@@ -1382,9 +1385,12 @@
     return { ...r, w: 0.75 * r.w + 0.25 * w, d: 0.75 * r.d + 0.25 * o.draw, l: 0.75 * r.l + 0.25 * l };
   }
 
+  // players the user marked unavailable, each until the end of the match day it was set for
+  const outNow = () => new Set(Object.entries(db.prefs.out || {}).filter(([, until]) => until > now()).map(([n]) => n));
+  const outUntil = () => (db.next?.date ? dmyMs(db.next.date) + 86400e3 : now() + 3 * 86400e3);
   function squadPool() {
     const tr = db.training?.rows || [];
-    const ex = new Set(db.prefs.excluded || []);
+    const ex = outNow();
     // youth team can't play; injured (still out on match day) and suspended players aren't available
     const days = db.next?.date ? Math.ceil((dmyMs(db.next.date) - now()) / 86400e3) : 0;
     return (db.squad?.players || []).filter(p => !ex.has(p.name) && p.tier !== 3 && !p.suspended && !(p.injuredDays >= Math.max(1, days))).map(p => {
@@ -2545,7 +2551,19 @@
       if (!db.next?.ordersUrl) throw new Error('Could not find this match in Starting Eleven');
       res = await withFrame(db.next.ordersUrl, lineupReady, async ctx => { ordersContext(ctx.doc); return run(ctx); });
     }
-    p.orders = { sig, at: now(), saved: res.saved, failed: res.failed };
+    if (res.saved && db.next?.ordersUrl) {
+      try {
+        const back = await withFrame(db.next.ordersUrl, lineupReady, async ({ doc }) => ({
+          ids: [...new Set($$('#starting_eleven .player-row a[href*="jog_id="]', doc).map(a => param(a.getAttribute('href'), 'jog_id')))], // talent badges link too
+          style: doc.getElementById('estilo_jogo_1')?.selectedOptions[0]?.textContent.trim(),
+          passing: doc.getElementById('estilo_jogo_2')?.selectedOptions[0]?.textContent.trim(),
+        }));
+        const want = new Set(plan.best.xi.map(x => x.p.id)), missing = plan.best.xi.filter(x => !back.ids.includes(x.p.id)).map(x => surname(x.p.name));
+        res.verified = missing.length === 0 && back.ids.length === want.size && norm(back.style || '') === norm(plan.best.style) && norm(back.passing || '').startsWith(norm(plan.best.passing));
+        if (!res.verified) logAction('orders', `Saved orders don't match the plan on re-reading (missing: ${missing.join(', ') || '—'}; style ${back.style}/${back.passing})`, false);
+      } catch (e) { logAction('orders', 'Could not re-read the saved orders: ' + e.message, false); }
+    }
+    p.orders = { sig, at: now(), saved: res.saved, verified: res.verified, failed: res.failed };
     // The game plays Default Orders whenever a match has none saved — so when the autopilot misses a match (no tab
     // open) the fallback is our latest plan, not an old manual lineup. Never MOTS there.
     if (res.saved && db.defaultOrdersSig !== sig) {
@@ -2560,7 +2578,7 @@
       db.mots.used = db.mots.used.filter(k => k !== plan.mots.nextKey);
       if (plan.mots.use) db.mots.used.push(plan.mots.nextKey);
     }
-    logAction('orders', `${formLabel(plan.best.f)} ${plan.best.style}/${plan.best.passing}${plan.best.ats ? '' : ' (ATs off)'}${plan.mots?.use ? ' · MOTS' : ''} vs ${plan.opp?.name}${res.saved ? ' · saved' : ' · not saved'}`, res.xiOk);
+    logAction('orders', `${formLabel(plan.best.f)} ${plan.best.style}/${plan.best.passing}${plan.best.ats ? '' : ' (ATs off)'}${plan.mots?.use ? ' · MOTS' : ''} vs ${plan.opp?.name}${res.saved ? (res.verified ? ' · saved and checked' : ' · saved') : ' · not saved'} — ${plan.best.xi.map(x => surname(x.p.name)).join(', ')}`, res.xiOk);
     return res;
   }
 
@@ -3324,6 +3342,8 @@ input.txt{flex:1;height:26px;border:1px solid var(--line);background:var(--bg);c
     if (plan.error) return h + `<div class="empty">${esc(plan.error)}</div>`;
     const { best, opp: o } = plan;
     h += sec('prep', 'Match prep', prepChecklist(), { right: `<button class="btn" data-act="pilot" ${piloting ? 'disabled' : ''}>Run now</button>` });
+    const outList = [...outNow()];
+    if (outList.length || db.clearedOut?.length) h += sec('out', 'Left out by you', `${outList.map(n => `<div class="row sp"><span>${esc(n)}</span><button class="btn" data-ex="${esc(n)}">back</button></div>`).join('')}${db.clearedOut?.length ? `<div class="xs mut" style="margin-top:4px">Cleared in 0.17.2: ${esc(db.clearedOut.join(', '))} — tapping a squad row used to mark a player unavailable for good, and they were left out of every lineup. Use “out” in the Squad tab now; it lasts one match. <button class="btn" data-act="ackout">OK</button></div>` : ''}`, { open: true });
     h += sec('plan', 'Plan', `
       <div class="row sp"><div><span class="big">${formLabel(best.f)}</span> <span class="xs mut">${esc(formDetail(best.f))}</span></div><span class="seg">${[['points', 'Pts'], ['avoid', 'No loss'], ['win', 'Win'], ['ranking', 'Rank']].map(([k, l]) => `<button data-obj="${k}" class="${db.prefs.objective === k ? 'on' : ''}">${l}</button>`).join('')}</span></div>
       <div class="row wr" style="margin:6px 0 8px">${chip(best.style)}${chip(best.passing + ' passing')}${chip('Attack ' + plan.pref)}${plan.captain ? chip('C ' + surname(plan.captain.p.name)) : ''}${plan.pens ? chip('Pen ' + surname(plan.pens.p.name)) : ''}</div>
@@ -3372,15 +3392,15 @@ input.txt{flex:1;height:26px;border:1px solid var(--line);background:var(--bg);c
     if (!db.squad) return `<div class="empty">No squad yet.<div style="margin-top:8px"><button class="btn p" data-act="pilot">Fetch everything</button></div></div>`;
     const plan = computePlan();
     const inXI = new Map((plan.best?.xi || []).map(x => [x.p.name, x.slot.code]));
-    const ex = new Set(db.prefs.excluded);
+    const ex = outNow();
     const pool = squadPool();
     const con = new Map((db.contracts?.rows || []).map(c => [c.id, c]));
     const all = (db.squad.players || []).map(p => ({ ...p, ...(pool.find(q => q.name === p.name) || {}), t: matchPlayer(p.name, db.training?.rows || [], p.id), c: con.get(p.id) }));
     all.sort((a, b) => (LINE_ORDER[a.line] ?? 9) - (LINE_ORDER[b.line] ?? 9) || roleSkill(b, b.line || 'M') - roleSkill(a, a.line || 'M'));
     let h = sec('squad', 'Squad', `<table><tr><th>Player</th><th>Pos</th><th class="n">Age</th><th class="n">Fit</th><th class="n">Rtg</th><th class="n" title="Projected rating at 26">@26</th><th class="n">Yrs</th><th></th></tr>${all.map(p => {
       const f = p.t?.fit;
-      return `<tr class="click ${ex.has(p.name) ? 'off' : ''}" data-ex="${esc(p.name)}"><td>${esc(p.name)}<div class="xs mut">${[p.t?.quality, p.t?.potential && 'pot ' + p.t.potential, p.form && 'form ' + p.form].filter(Boolean).map(esc).join(' · ')}</div></td><td class="xs" style="white-space:nowrap">${esc(p.line || '?')} ${esc(p.sides || '')}</td><td class="n">${p.age ?? ''}</td><td class="n">${isFinite(f) ? `<span style="color:${f < 80 ? 'var(--bad)' : f < 90 ? 'var(--warn)' : 'inherit'}">${f}</span>` : ''}</td><td class="n">${f1(roleSkill(p, p.line || 'M'))}</td><td class="n">${(() => { const v = valuePath({ ...p, potential: p.t?.potential }, { line: p.line || 'M', lane: (p.sides || 'C')[0], code: '' }, plan); const d = v.at26 - v.now; return `${f1(v.at26)}${d > 0.4 ? `<div class="xs" style="color:var(--good)">+${f1(d)}</div>` : ''}`; })()}</td><td class="n">${p.c ? `<span style="color:${p.c.years <= 1 ? 'var(--bad)' : 'inherit'}">${p.c.years}</span>` : ''}</td><td>${inXI.has(p.name) ? chip(inXI.get(p.name), 'g') : ''}</td></tr>`;
-    }).join('')}</table><div class="xs mut" style="margin-top:6px">Tap a player to mark him unavailable. Rtg = weighted position skills (0–20).</div>`, { right: `${pool.length} available` });
+      return `<tr class="${ex.has(p.name) ? 'off' : ''}"><td>${esc(p.name)}<div class="xs mut">${[p.t?.quality, p.t?.potential && 'pot ' + p.t.potential, p.form && 'form ' + p.form].filter(Boolean).map(esc).join(' · ')}</div></td><td class="xs" style="white-space:nowrap">${esc(p.line || '?')} ${esc(p.sides || '')}</td><td class="n">${p.age ?? ''}</td><td class="n">${isFinite(f) ? `<span style="color:${f < 80 ? 'var(--bad)' : f < 90 ? 'var(--warn)' : 'inherit'}">${f}</span>` : ''}</td><td class="n">${f1(roleSkill(p, p.line || 'M'))}</td><td class="n">${(() => { const v = valuePath({ ...p, potential: p.t?.potential }, { line: p.line || 'M', lane: (p.sides || 'C')[0], code: '' }, plan); const d = v.at26 - v.now; return `${f1(v.at26)}${d > 0.4 ? `<div class="xs" style="color:var(--good)">+${f1(d)}</div>` : ''}`; })()}</td><td class="n">${p.c ? `<span style="color:${p.c.years <= 1 ? 'var(--bad)' : 'inherit'}">${p.c.years}</span>` : ''}</td><td style="white-space:nowrap">${inXI.has(p.name) ? chip(inXI.get(p.name), 'g') : ''} <button class="btn" data-ex="${esc(p.name)}" title="${ex.has(p.name) ? 'Make him available again' : 'Leave him out of the next match only'}">${ex.has(p.name) ? 'back' : 'out'}</button></td></tr>`;
+    }).join('')}</table><div class="xs mut" style="margin-top:6px">“out” leaves a player out of the next match only (he’s back automatically after it). Rtg = weighted position skills (0–20).</div>`, { right: `${pool.length} available` });
     const Y = youthMoves(plan);
     const yt = [
       ...Y.back.map(({ p, ok, why }) => ({ lvl: ok ? 'warn' : 'info', t: ok ? `${p.name} (${p.age}) isn't in the XI — back to the youth team for full training every league round${db.prefs.autoYouth ? ' (autopilot does it)' : ''}. He can be promoted again any time.` : `${p.name} (${p.age}) could go back to the youth team for full training, but stays: ${why}.` })),
@@ -3582,9 +3602,9 @@ input.txt{flex:1;height:26px;border:1px solid var(--line);background:var(--bg);c
     if (t.dataset.buypct) { db.prefs.buyPct = +t.dataset.buypct; save(); return render(); }
     if (t.dataset.maxage) { db.prefs.maxBuyAge = +t.dataset.maxage; save(); return render(); }
     if (t.dataset.ex) {
-      const ex = new Set(db.prefs.excluded);
-      if (ex.has(t.dataset.ex)) ex.delete(t.dataset.ex); else ex.add(t.dataset.ex);
-      db.prefs.excluded = [...ex];
+      const out = (db.prefs.out = db.prefs.out || {});
+      if (outNow().has(t.dataset.ex)) delete out[t.dataset.ex]; else out[t.dataset.ex] = outUntil();
+      planCache = { v: -1, plan: null };
       save();
       return render();
     }
@@ -3612,6 +3632,7 @@ input.txt{flex:1;height:26px;border:1px solid var(--line);background:var(--bg);c
       case 'reset':
         if (confirm('Clear all PM Copilot data?')) { db = blankDb(); save(); render(); }
         return;
+      case 'ackout': delete db.clearedOut; save(); return render();
       case 'apply': return runBusy(async () => { const r = await applyOrders({ force: true }); return [r ? `Orders ${r.saved ? 'saved' : 'filled'}${r.failed.length ? ' · skipped ' + r.failed.join(', ') : ''}` : 'Already up to date']; }, 'Applying orders');
       case 'train': return runBusy(async () => { const r = await autoTraining(); db.trainingAppliedAt = now(); save(); return [`${r.n} training orders changed${r.staff ? ', staff → ' + r.staff : ''}`]; }, 'Training');
       case 'pref': {
