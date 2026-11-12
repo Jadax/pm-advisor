@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PM Copilot — Planetarium Manager assistant
 // @namespace    pm-copilot
-// @version      0.17.2
+// @version      0.17.3
 // @description  Opponent-aware tactics, match prep autopilot, training, transfers, finance and facilities for pmanager.org — learns from every match. Changelog: github.com/Jadax/pm-advisor
 // @author       Tushant Sharma
 // @license      MIT
@@ -23,7 +23,7 @@
 (() => {
   'use strict';
   if (window.top !== window.self) return;
-  const VERSION = '0.17.2';
+  const VERSION = '0.17.3';
   const PAGE = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
 
   /* =========================================================================
@@ -898,7 +898,9 @@
   }
 
   const PAGES = {
-    squad: () => db.squad?.url || '/plantel.asp?equipa=2&pos=',
+    // filtro=1 = the Skills view. The page otherwise opens on the view last picked in that browser (e.g. Player
+    // Report, which has no skills) — the squad then never refreshed and new signings never reached the plan.
+    squad: () => '/plantel.asp?equipa=2&filtro=1&pos=',
     training: () => '/treinos.asp?equipa=A',
     economy: () => '/financas.asp',
     academy: () => '/academia.asp',
@@ -918,7 +920,9 @@
     const log = [];
     for (const [k, f] of Object.entries(PAGES)) {
       progress(`Reading ${k}…`);
-      try { log.push(await grab(f()) || `${k}: nothing recognised`); } catch (e) { log.push(`${k}: ${e.message}`); }
+      let got = null;
+      try { got = await grab(f()); log.push(got || `${k}: nothing recognised`); } catch (e) { log.push(`${k}: ${e.message}`); }
+      if (k === 'squad' && !got) logAction('refresh', 'Squad page not read — the plan is using an old squad', false);
       await sleep(150);
     }
     const reps = (db.fixtures?.list || []).filter(f => f.reportId && !db.reports[f.reportId]);
@@ -3342,6 +3346,8 @@ input.txt{flex:1;height:26px;border:1px solid var(--line);background:var(--bg);c
     if (plan.error) return h + `<div class="empty">${esc(plan.error)}</div>`;
     const { best, opp: o } = plan;
     h += sec('prep', 'Match prep', prepChecklist(), { right: `<button class="btn" data-act="pilot" ${piloting ? 'disabled' : ''}>Run now</button>` });
+    const sqAge = db.squad?.at ? (now() - db.squad.at) / 3600e3 : null;
+    if (sqAge > 12) h += list([{ lvl: 'warn', t: `Squad data is ${Math.round(sqAge)} h old — new signings and form changes aren't in this plan. Press Run now; if it stays old, the squad page couldn't be read (see Auto → log).` }]);
     const outList = [...outNow()];
     if (outList.length || db.clearedOut?.length) h += sec('out', 'Left out by you', `${outList.map(n => `<div class="row sp"><span>${esc(n)}</span><button class="btn" data-ex="${esc(n)}">back</button></div>`).join('')}${db.clearedOut?.length ? `<div class="xs mut" style="margin-top:4px">Cleared in 0.17.2: ${esc(db.clearedOut.join(', '))} — tapping a squad row used to mark a player unavailable for good, and they were left out of every lineup. Use “out” in the Squad tab now; it lasts one match. <button class="btn" data-act="ackout">OK</button></div>` : ''}`, { open: true });
     h += sec('plan', 'Plan', `

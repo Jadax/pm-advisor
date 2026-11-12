@@ -2,6 +2,10 @@
 
 Newest first. Written by the daily review (and by hand) whenever the data changes the engine.
 
+## 2026-11-12 — v0.17.3 (the real cause: squad never refreshed)
+- **Found (in the user's own browser):** the user's copy had no Brekhun at all — its stored squad was 16 players from before he signed, with old forms (Šeremet "Very Bad", Kesici "Bad"). The squad page opens on the view last picked in that browser; the user's was **Player Report**, which has no skill columns, so the parser rejected every refresh (by design) and the old squad stayed in use without any warning. The browser pane used for testing opened on Skills, so it never showed. (The 0.17.2 "row-tap" theory reproduced the same lineup but was not the cause: the user's copy had no marks.)
+- **Changed:** the squad is always fetched as the Skills view (`plantel.asp?equipa=2&filtro=1`); a refresh that can't read it is logged as a failure, and the Match tab warns when squad data is over 12 h old.
+
 ## 2026-11-12 — v0.17.2 (accidental exclusions; orders re-read after saving)
 - **Found:** the 14/11 orders were re-saved by the user's own copy as 4-3-3 Attacking/Short with Rymarz, Preto, Zottelin up front, Pinto RB, Mohd CD, Zonal marking, no One-on-Ones. Recomputing the plan with Brekhun, Šeremet and Kesici marked unavailable reproduces exactly that XI and those options. In the Squad tab, tapping a row marked a player unavailable — for good, with only a faded row to show for it.
 - **Changed:** old marks are cleared once (listed in the Match tab); "out" is now an explicit button that lasts until the end of the next match day; the Match tab lists who is left out by hand with a "back" button. After saving, the autopilot re-reads the match's orders and checks the XI and style/passing against the plan ("saved and checked", or a ✗ entry naming what differs). The log line now lists the XI.
