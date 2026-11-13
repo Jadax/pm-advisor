@@ -2,6 +2,12 @@
 
 Newest first. Written by the daily review (and by hand) whenever the data changes the engine.
 
+## 2026-11-13 — no change (v0.18.0 stays)
+- **Data:** no fresh harvest (browser pane closed); local data unchanged since 01/11 — 99 reports, 2 decisions, 1 graded match (model Brier 0.001 vs pundits 0.639).
+- **Refit:** identical (weighted BASE 5.95, K_BEAT 1.03, K_GK 1.32, K_MID 7.39; −253.4 vs −455.2 constant-rate).
+- **Not changed:** no new evidence to test v0.18.0's per-opponent orders; weather still 11–21 games per condition (<30), advanced tactics still confounded by team strength.
+- **Watch:** 12 days without a harvest — open the browser pane signed in to pmanager.org before the next run so the matches since 01/11 (incl. 14/11 vs Bright PMB) can be graded.
+
 ## 2026-11-12 — v0.18.0 (every match planned per opponent; signings reach the plan at once)
 - **Orders for later matches:** each match listed in Starting Eleven gets its own XI and Advanced Options against its own opponent (from their reports; no MOTS), so a match the autopilot can't reach in time plays an opponent-specific plan, not Default Orders. Saved today: 18/11 @ Mount Ayliff — no marking, attack on wings; 21/11 vs Qwa-Qwa — man-to-man, no one-on-ones, attack right; 14/11 vs Bright PMB — man-to-man, one-on-ones, rushing out, long shots, attack left. Each is re-planned with scouting, weather and MOTS when it becomes the next match.
 - **Signings/sales:** every autopilot run re-reads the squad if it is over 30 min old and reads any new player's page (form, talent, integration) before planning.

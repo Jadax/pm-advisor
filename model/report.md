@@ -1,6 +1,6 @@
 # PM Copilot model report
 
-Generated 2026-11-12 13:49 from 99 reports (99 with full zone ratings).
+Generated 2026-11-13 14:18 from 99 reports (99 with full zone ratings).
 
 ## Goal model
 
