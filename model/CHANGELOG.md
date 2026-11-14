@@ -2,6 +2,11 @@
 
 Newest first. Written by the daily review (and by hand) whenever the data changes the engine.
 
+## 2026-11-14 — no change (v0.18.0 stays)
+- **Data:** no fresh harvest (browser pane closed); local data unchanged since 01/11 — 99 reports, 2 decisions, 1 graded match (model Brier 0.001 vs pundits 0.639). Refit identical (only the timestamp moved).
+- **Not changed:** nothing new to test; weather still <30 games per condition, advanced tactics still confounded by team strength.
+- **Watch:** 13 days without a harvest — today's match vs Bright PMB (14/11) and the games since 01/11 can only be graded after a harvest from a signed-in browser pane.
+
 ## 2026-11-13 — no change (v0.18.0 stays)
 - **Data:** no fresh harvest (browser pane closed); local data unchanged since 01/11 — 99 reports, 2 decisions, 1 graded match (model Brier 0.001 vs pundits 0.639).
 - **Refit:** identical (weighted BASE 5.95, K_BEAT 1.03, K_GK 1.32, K_MID 7.39; −253.4 vs −455.2 constant-rate).
