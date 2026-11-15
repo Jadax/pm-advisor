@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PM Copilot — Planetarium Manager assistant
 // @namespace    pm-copilot
-// @version      0.18.0
+// @version      0.19.0
 // @description  Opponent-aware tactics, match prep autopilot, training, transfers, finance and facilities for pmanager.org — learns from every match. Changelog: github.com/Jadax/pm-advisor
 // @author       Tushant Sharma
 // @license      MIT
@@ -23,7 +23,7 @@
 (() => {
   'use strict';
   if (window.top !== window.self) return;
-  const VERSION = '0.18.0';
+  const VERSION = '0.19.0';
   const PAGE = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
 
   /* =========================================================================
@@ -306,7 +306,8 @@
       p.aq = num(r.querySelector('.sq-av .sq-gn')?.textContent);
     }
     const text = docText(doc.body);
-    db.squad = { players, wagesSum: num((text.match(/Wages Sum\s*\$?\s*([\d.,]+)/i) || [])[1]), url: u.pathname + u.search, at: now() };
+    // the page's own player count: if it differs from what we parsed, rows were missed
+    db.squad = { players, count: num((text.match(/Players\s+(\d+)\s+Average/i) || [])[1]), wagesSum: num((text.match(/Wages Sum\s*\$?\s*([\d.,]+)/i) || [])[1]), url: u.pathname + u.search, at: now() };
     save();
     return `Squad: ${players.length} players`;
   }
@@ -890,6 +891,7 @@
     const v = num(doc.querySelector('td.team_players a[href*="financas.asp"] b')?.textContent);
     if (!isFinite(v)) return;
     db.me.funds = v;
+    db.me.fundsAt = now();
     if (db.economy) db.economy.funds = v;
   }
   async function grab(url, ctx) {
@@ -1177,22 +1179,53 @@
     };
   }
 
-  function decideATs(at, style, ourForm, theirForm, safe) {
+  // The game's commentary says when a side's advanced tactic is working (phrases read off 79 division reports,
+  // 2026-11-15), and announces a Match of the Season ("played at 200%").
+  const AT_CONFIRM = { keeping: /goal-keeper of .* style is confusing/i, longShots: /able to use their long shots/i, marking: /marking style applied/i, oneOnOne: /winning the majority of one-on-one/i, firstTime: /first-time shots ability/i, counter: /dangerous counter-attacks/i, highBalls: /playing the high ball very well/i, pressing: /pressing made by/i, offside: /in offside frequently/i };
+  const MOTS_MSG = /played at 200%/i;
+  const AT_KEYS = Object.keys(AT_CONFIRM);
+  // which advanced tactics a side had on, from the report's stats table
+  function atOnFromStats(st) {
+    if (!st) return null;
+    const yes = k => /^yes/i.test(st[k] || ''), set = k => !!st[k] && !/^(no|normal|not defined)$/i.test(st[k]);
+    return { pressing: set('Pressing'), offside: yes('Offside Trap'), counter: yes('Counter Attack'), highBalls: yes('High Balls'), oneOnOne: yes('One-on-Ones'), keeping: set('Keeping Style'), marking: set('Marking'), longShots: yes('Long Shots'), firstTime: yes('First Time Shots') };
+  }
+  // Per tactic: times a side had it on, and times the commentary confirmed it — ours and the whole division's.
+  function learnATs() {
+    const me = norm(db.me.name || ''), rec = { us: {}, all: {} };
+    for (const r of Object.values(db.reports)) for (const s of r.sides || []) {
+      if (!s.stats || !s.moves) continue; // only reports read with commentary
+      const on = atOnFromStats(s.stats), msgs = (s.atMsgs || []).join(' ');
+      for (const k of AT_KEYS) if (on[k]) for (const who of norm(s.team) === me ? ['us', 'all'] : ['all']) {
+        const x = (rec[who][k] = rec[who][k] || { used: 0, ok: 0 });
+        x.used++;
+        if (AT_CONFIRM[k].test(msgs)) x.ok++;
+      }
+    }
+    db.model = { ...db.model, atRecord: rec };
+    return rec;
+  }
+  // A tactic we keep switching on that the game (almost) never confirms needs twice the skill margin from now on.
+  const atDistrust = k => { const x = db.model?.atRecord?.us?.[k]; return x && x.used >= 4 && x.ok / x.used < 0.15 ? 2 : 1; };
+  function decideATs(at, style, ourForm, theirForm, safe0) {
     if (!at) return null;
-    const allWin = cs => cs.every(c => c.win && c.margin > safe);
+    let safe = safe0;
+    const allWin = (cs, k) => cs.every(c => c.win && c.margin > safe0 * (k ? atDistrust(k) : 1));
     const d = {};
-    d.pressing = allWin(at.pressHigh) ? 'High' : allWin(at.pressLow) ? 'Low' : 'Normal';
-    d.offside = allWin(at.offside);
+    d.pressing = allWin(at.pressHigh, 'pressing') ? 'High' : allWin(at.pressLow, 'pressing') ? 'Low' : 'Normal';
+    d.offside = allWin(at.offside, 'offside');
     const defensive = style === 'Defensive' || (ourForm && theirForm && ourForm.D.n > theirForm.F.n + 1);
+    safe = safe0 * atDistrust('counter');
     const cw = (at.counter.speed.win && at.counter.speed.margin > safe ? 0.45 : 0) + (at.counter.pass.win && at.counter.pass.margin > safe ? 0.25 : 0) + (defensive ? 0.3 : 0);
     d.counter = cw >= 0.7;
-    d.highBalls = allWin(at.highBalls);
-    d.oneOnOne = allWin(at.oneOnOne);
+    d.highBalls = allWin(at.highBalls, 'highBalls');
+    d.oneOnOne = allWin(at.oneOnOne, 'oneOnOne');
     const si = at.standIn[0], ro = at.rushOut[0];
+    safe = safe0 * atDistrust('keeping');
     d.keeping = si.win && si.margin > safe && si.margin >= ro.margin ? 'Stand In' : ro.win && ro.margin > safe ? 'Rushing out' : 'Not Defined';
-    d.marking = allWin(at.zonal) && at.zonal[0].margin >= at.manMark[0].margin ? 'Zonal' : allWin(at.manMark) ? 'Man to Man' : 'Not Defined';
-    d.longShots = allWin(at.longShots);
-    d.firstTime = ourForm && ourForm.F.n >= 3 && allWin(at.firstTime);
+    d.marking = allWin(at.zonal, 'marking') && at.zonal[0].margin >= at.manMark[0].margin ? 'Zonal' : allWin(at.manMark, 'marking') ? 'Man to Man' : 'Not Defined';
+    d.longShots = allWin(at.longShots, 'longShots');
+    d.firstTime = ourForm && ourForm.F.n >= 3 && allWin(at.firstTime, 'firstTime');
     d.won = [d.pressing !== 'Normal', d.offside, d.counter, d.highBalls, d.oneOnOne, d.keeping !== 'Not Defined', d.marking !== 'Not Defined', d.longShots, d.firstTime].filter(Boolean).length;
     return d;
   }
@@ -1382,11 +1415,27 @@
     return 3 * r.w + r.d + gd;
   }
   // Shown numbers lean 25% on the pundits: the model is fitted on few games and can't see form swings.
+  // Shown forecast = model blended with the pundits; the blend weight is learned from graded matches (learnBlend).
+  const PUNDIT_W = 0.25;
   function shown(r) {
     const o = db.next?.odds;
     if (!o || db.next.weAreHome == null) return r;
     const [w, l] = db.next.weAreHome ? [o.home, o.away] : [o.away, o.home];
-    return { ...r, w: 0.75 * r.w + 0.25 * w, d: 0.75 * r.d + 0.25 * o.draw, l: 0.75 * r.l + 0.25 * l };
+    const k = db.model?.punditW ?? PUNDIT_W;
+    return { ...r, w: (1 - k) * r.w + k * w, d: (1 - k) * r.d + k * o.draw, l: (1 - k) * r.l + k * l };
+  }
+  // The weight that would have scored best (Brier) on our graded matches, shrunk toward 0.25 until ~10 matches.
+  function learnBlend() {
+    const g = Object.values(db.matchDb || {}).filter(m => m.result && m.decision?.pundits && m.decision.forecast);
+    if (g.length < 3) return null;
+    const probs = m => { const d = m.decision, p = d.pundits; return { f: d.forecast, p: d.weAreHome ? { w: p.home, d: p.draw, l: p.away } : { w: p.away, d: p.draw, l: p.home }, res: m.result.res }; };
+    const rows = g.map(probs);
+    const brier = k => avg(rows.map(({ f, p, res }) => ['w', 'd', 'l'].reduce((s, x) => s + ((1 - k) * f[x] + k * p[x] - (x === res ? 1 : 0)) ** 2, 0)));
+    let best = 0;
+    for (let k = 0; k <= 1.0001; k += 0.05) if (brier(k) < brier(best)) best = +k.toFixed(2);
+    const w = +((rows.length * best + 10 * PUNDIT_W) / (rows.length + 10)).toFixed(3);
+    db.model = { ...db.model, punditW: w, blendOn: rows.length, blendBrier: +brier(w).toFixed(3) };
+    return w;
   }
 
   // players the user marked unavailable, each until the end of the match day it was set for
@@ -1578,8 +1627,10 @@
     const season = lg[0] ? fixtureKey(lg[0]) + '|' + lg[0].date : 'unknown';
     if (!db.mots || db.mots.season !== season) db.mots = { season, base: 0, used: [] };
     const played = new Set((db.fixtures?.list || []).filter(f => f.score).map(fixtureKey));
-    const used = db.mots.base + db.mots.used.filter(k => played.has(k)).length;
-    return { used, left: Math.max(0, MOTS_PER_SEASON - used), pending: db.mots.used.filter(k => !played.has(k)) };
+    const me = norm(db.me.name || '');
+    const seen = (db.fixtures?.list || []).filter(f => f.reportId && db.reports[f.reportId]).filter(f => (db.reports[f.reportId].sides.find(x => norm(x.team) === me)?.atMsgs || []).some(m => MOTS_MSG.test(m))).length;
+    const used = Math.max(seen, db.mots.base + db.mots.used.filter(k => played.has(k)).length);
+    return { used, seen, left: Math.max(0, MOTS_PER_SEASON - used), pending: db.mots.used.filter(k => !played.has(k)) };
   }
   // How a division opponent plays, from their reports (unknown side: an even match with our own zones).
   function sideFromHistory(opp, home, fallbackZ) {
@@ -1611,7 +1662,8 @@
     const nextF = oppNext && db.fixtures.list.find(f => !f.score && [norm(f.home), norm(f.away)].includes(oppNext));
     const nextK = nextF ? fixtureKey(nextF) : null;
     const base = { z: plan.best.z, style: plan.best.style, passing: plan.best.passing, atWon: plan.best.ats?.won || 0, pref: plan.pref, shape: shapeKey(plan.best.f) };
-    const theirMots = name => { const t = teamByName(name); return !t || t.bot !== false || (t.motsUsed ?? 0) >= MOTS_PER_SEASON ? 0 : HUMAN_MOTS; };
+    const motsSeen = name => { const t = teamByName(name); return (t?.fixtures || []).filter(f => f.reportId && db.reports[f.reportId]).filter(f => (db.reports[f.reportId].sides.find(x => norm(x.team) === norm(name))?.atMsgs || []).some(m => MOTS_MSG.test(m))).length; };
+    const theirMots = name => { const t = teamByName(name); return !t || t.bot !== false || Math.max(t.motsUsed ?? 0, motsSeen(name)) >= MOTS_PER_SEASON ? 0 : HUMAN_MOTS; };
     const vsOpp = (us, side, opp) => {
       const p = theirMots(opp), a = simulate(us, side);
       if (!p) return a;
@@ -2501,7 +2553,7 @@
     const nextOpp = opponentName();
     const games = Array.from(sel?.options || []).map(o => ({ url: '/' + o.value.replace(/^\//, ''), m: clean(o.textContent).match(/^vs\s+(.+?)\s+@\s+([\d/]+)\s*\((H|A)\)/) }))
       .filter(g => g.m && /jogo_id=/.test(g.url) && norm(g.m[1]) !== norm(nextOpp || ''));
-    const keep = db.next, out = [];
+    const keep = db.next, out = [], status = [];
     try {
       for (const g of games) {
         const [, opp, date, ha] = g.m, home = ha === 'H';
@@ -2513,6 +2565,7 @@
         const sig = planSignature({ ...plan, mots: null });
         db.prep = db.prep || {};
         const p = (db.prep[key] = db.prep[key] || {});
+        status.push({ opp, date, key });
         if (p.early?.sig === sig || p.orders?.saved) continue; // up to date, or already done as the next match
         const dplan = { ...plan, mots: plan.mots && { ...plan.mots, use: false } };
         const res = await withFrame(g.url, lineupReady, async ctx => { const r = applyPlan(dplan, ctx); return { ...r, saved: r.xiOk ? await saveOrders(ctx) : false }; });
@@ -2521,6 +2574,7 @@
         await sleep(150);
       }
     } finally { db.next = keep; planCache = { v: -1, plan: null }; save(); }
+    db.upcomingOrders = { at: now(), list: status.map(x => ({ ...x, saved: !!(db.prep[x.key]?.early?.saved || db.prep[x.key]?.orders?.saved) })) };
     if (out.length) logAction('orders', 'Later matches: ' + out.join(' · '));
     return out;
   }
@@ -3103,7 +3157,12 @@
       const brier = f => (f ? ['w', 'd', 'l'].reduce((s, x) => s + ((f[x] || 0) - (x === res ? 1 : 0)) ** 2, 0) : null);
       const pund = d.pundits && (d.weAreHome ? { w: d.pundits.home, d: d.pundits.draw, l: d.pundits.away } : { w: d.pundits.away, d: d.pundits.draw, l: d.pundits.home });
       const started = new Set(r.sides[us].players.map(p => String(p.id)));
-      m.result = { gf, ga, res, brier: brier(d.forecast), brierPundits: brier(pund), followed: d.plan.ids.filter(id => started.has(String(id))).length >= 10 && r.sides[us].style === d.plan.style, ourAvg: r.sides[us].zones?.avg, theirAvg: r.sides[1 - us].zones?.avg };
+      const side = r.sides[us], name = id => surname(side.players.find(p => String(p.id) === String(id))?.name || (db.squad?.players || []).find(p => String(p.id) === String(id))?.name || id);
+      const missing = d.plan.ids.filter(id => !started.has(String(id))).map(name), extra = [...started].filter(id => !d.plan.ids.map(String).includes(id)).map(name);
+      const styleOk = norm(side.style || '') === norm(d.plan.style || ''), passOk = !side.passing || !d.plan.passing || norm(side.passing).startsWith(norm(d.plan.passing));
+      m.result = { gf, ga, res, brier: brier(d.forecast), brierPundits: brier(pund), followed: missing.length <= 1 && styleOk, missing, extra, styleOk, passOk, xgFor: d.forecast.xgFor, xgAg: d.forecast.xgAg, ourAvg: side.zones?.avg, theirAvg: r.sides[1 - us].zones?.avg };
+      // the plan didn't reach the game — the most expensive silent failure there is; say it loudly
+      if (!m.result.followed) logAction('review', `${d.home} – ${d.away} (${d.date}) was NOT played as planned: ${missing.length ? 'missing ' + missing.join(', ') : ''}${extra.length ? '; played instead ' + extra.join(', ') : ''}${styleOk ? '' : `; style ${side.style} instead of ${d.plan.style}`}`, false);
       logAction('learn', `${d.home} ${r.score.join('-')} ${d.away}: forecast ${pct(d.forecast.w)} win → ${res.toUpperCase()} (Brier ${m.result.brier.toFixed(2)}${m.result.brierPundits != null ? ` vs pundits ${m.result.brierPundits.toFixed(2)}` : ''})`);
       n++;
     }
@@ -3124,16 +3183,70 @@
     if (!db.divisionCrawledAt || now() - db.divisionCrawledAt > 20 * 3600e3) await crawlDivision(progress);
     recordGrowth();
     gradeMatches();
+    learnBlend();
+    learnATs();
     progress('Calibrating…');
     if (!db.model?.fittedAt || now() - db.model.fittedAt > 20 * 3600e3 || (db.model.fittedOn || 0) + 20 <= Object.keys(db.reports).length) { learnRating(); learnLanes(); calibrateModel(); learnShapes(); }
     else if (!db.model?.shapeFx) learnShapes();
   }
   const today = () => new Date().toISOString().slice(0, 10);
 
+  /* Self-check, run after every autopilot pass. Each line is something that once failed silently: a squad that
+   * never refreshed, orders that never reached the game, stale form, a plan nobody followed. A failure is
+   * logged when it first appears and shown at the top of the Match tab until it clears. */
+  function healthCheck() {
+    const out = [], add = (id, lvl, t) => out.push({ id, lvl, t });
+    const h = ms => (ms ? (now() - ms) / 3600e3 : Infinity), hrs = x => (isFinite(x) ? `${x < 1 ? Math.round(x * 60) + ' min' : Math.round(x) + ' h'}` : 'never');
+    const nextMs = db.next?.date ? dmyMs(db.next.date) : null, toKick = nextMs ? (nextMs - now()) / 3600e3 : null;
+    if (h(db.lastPilotAt) > 1.5 && toKick != null && toKick < 24) add('pilot', 'bad', `Autopilot last ran ${hrs(h(db.lastPilotAt))} ago and the next match is within a day — keep a pmanager tab open, or press Run now.`);
+    const sq = db.squad;
+    if (!sq) add('squad', 'bad', 'No squad read yet.');
+    else {
+      if (h(sq.at) > 2) add('squad', 'bad', `Squad last read ${hrs(h(sq.at))} ago — signings and sales since then aren't in the plan.`);
+      if (sq.count && sq.count !== sq.players.length) add('squadn', 'bad', `The squad page lists ${sq.count} players, the engine read ${sq.players.length}.`);
+      const stale = sq.players.filter(p => p.tier !== 3 && h(db.details[p.id]?.at) > 6).map(p => surname(p.name));
+      if (stale.length) add('details', 'warn', `Form/happiness not read in 6 h for: ${stale.join(', ')}.`);
+    }
+    const tr = db.training;
+    if (tr) {
+      const off = trainingAdvice().rows.filter(r => r.mismatch).map(r => `${surname(r.p.name)} (${r.cur} → ${r.rec})`);
+      if (off.length) add('training', 'warn', `Training orders not as planned: ${off.join(', ')}.`);
+      if (tr.amFitness != null && tr.amFitness !== AM_FITNESS) add('amfit', 'warn', `Assistant's automatic fitness line is ${tr.amFitness}%, should be ${AM_FITNESS}%.`);
+      const ids = new Set((sq?.players || []).map(p => p.id));
+      const unknown = tr.rows.filter(r => !ids.has(r.id)).map(r => r.name);
+      if (unknown.length) add('trainsquad', 'bad', `On the training page but not in the engine's squad: ${unknown.join(', ')}.`);
+    }
+    if (db.next) {
+      const plan = computePlan();
+      if (plan.error) add('plan', 'bad', plan.error);
+      else {
+        const p = prep(), sig = planSignature(plan);
+        if (!p.orders) add('orders', db.prefs.autoApply ? 'bad' : 'warn', 'No orders saved for the next match yet.');
+        else if (!p.orders.saved) add('orders', 'bad', 'Orders for the next match were filled in but NOT saved.');
+        else if (p.orders.verified === false) add('orders', 'bad', 'Saved orders for the next match don\'t match the plan on re-reading.');
+        else if (p.orders.sig !== sig) add('orders', 'warn', 'The plan changed since the orders were saved — the next run re-saves them.');
+        if (db.prefs.autoEvents && p.events?.sig !== sig) add('events', 'warn', "Match events don't follow the current plan yet.");
+      }
+    }
+    const later = (db.upcomingOrders?.list || []).filter(x => !x.saved).map(x => `${x.opp} (${x.date})`);
+    if (later.length) add('later', 'warn', `No orders of their own yet: ${later.join(', ')} — they'd play Default Orders.`);
+    const last = Object.values(db.matchDb || {}).filter(m => m.result).sort((a, b) => dateKey(b.decision.date) - dateKey(a.decision.date))[0];
+    if (last && !last.result.followed) add('followed', 'bad', `Last match (${last.decision.date}) wasn't played as planned${last.result.missing?.length ? ': ' + last.result.missing.join(', ') + ' missing' : ''}.`);
+    if (h(db.me.fundsAt) > 6) add('funds', 'warn', `Funds last read ${hrs(h(db.me.fundsAt))} ago.`);
+    if (db.scan && h(db.scan.verifiedAt) > 4) add('board', 'warn', `Transfer board last checked ${hrs(h(db.scan.verifiedAt))} ago — some players may be sold.`);
+    if (h(db.model?.fittedAt) > 30) add('model', 'warn', `Match model last refitted ${hrs(h(db.model?.fittedAt))} ago.`);
+    const fails = [...new Map((db.actions || []).filter(a => !a.ok && h(a.at) < 24 && a.kind !== 'review').map(a => [a.kind + a.text.slice(0, 40), a])).values()].slice(0, 4);
+    for (const a of fails) add('err:' + a.kind, 'warn', `${a.kind}: ${a.text}`);
+    const prev = new Set(db.health?.failing || []), failing = out.filter(x => x.lvl === 'bad').map(x => x.id);
+    for (const x of out) if (x.lvl === 'bad' && !prev.has(x.id)) logAction('health', x.t, false);
+    db.health = { at: now(), items: out, failing };
+    return out;
+  }
   let piloting = false;
   async function autoPilot({ forceOrders = false } = {}) {
     if (piloting) return;
     piloting = true;
+    db.lastPilotAt = now();
     const step = async (name, fn) => { try { setStatus(name + '…'); await fn(); } catch (e) { logAction(name, e.message, false); } };
     try {
       if (db.prefs.autoRefresh && (!db.lastRefresh || now() - db.lastRefresh > 2 * 3600e3)) await step('Refreshing data', () => refreshAll(setStatus));
@@ -3157,6 +3270,7 @@
     } finally {
       piloting = false;
       setStatus(null);
+      try { healthCheck(); } catch (e) { logAction('health', 'check failed: ' + e.message, false); }
       save();
       badgeMarketRows();
       if (panel.classList.contains('open')) render();
@@ -3385,8 +3499,10 @@ input.txt{flex:1;height:26px;border:1px solid var(--line);background:var(--bg);c
     if (plan.error) return h + `<div class="empty">${esc(plan.error)}</div>`;
     const { best, opp: o } = plan;
     h += sec('prep', 'Match prep', prepChecklist(), { right: `<button class="btn" data-act="pilot" ${piloting ? 'disabled' : ''}>Run now</button>` });
-    const sqAge = db.squad?.at ? (now() - db.squad.at) / 3600e3 : null;
-    if (sqAge > 12) h += list([{ lvl: 'warn', t: `Squad data is ${Math.round(sqAge)} h old — new signings and form changes aren't in this plan. Press Run now; if it stays old, the squad page couldn't be read (see Auto → log).` }]);
+    {
+      const H = healthCheck(), bad = H.filter(x => x.lvl === 'bad').length;
+      h += sec('health', 'Health', H.length ? list(H.map(x => ({ lvl: x.lvl, t: x.t }))) : list([{ lvl: 'good', t: 'All checks pass: squad, form, training, orders for every match, events, transfer board.' }]), { open: H.length > 0, right: H.length ? chip(`${bad ? bad + ' failing' : H.length + ' to watch'}`, bad ? 'x' : 'w') : chip('all good', 'g') });
+    }
     const outList = [...outNow()];
     if (outList.length || db.clearedOut?.length) h += sec('out', 'Left out by you', `${outList.map(n => `<div class="row sp"><span>${esc(n)}</span><button class="btn" data-ex="${esc(n)}">back</button></div>`).join('')}${db.clearedOut?.length ? `<div class="xs mut" style="margin-top:4px">Cleared in 0.17.2: ${esc(db.clearedOut.join(', '))} — tapping a squad row used to mark a player unavailable for good, and they were left out of every lineup. Use “out” in the Squad tab now; it lasts one match. <button class="btn" data-act="ackout">OK</button></div>` : ''}`, { open: true });
     h += sec('plan', 'Plan', `
@@ -3421,12 +3537,12 @@ input.txt{flex:1;height:26px;border:1px solid var(--line);background:var(--bg);c
         ${atr('Marking', a.marking, `zonal ${c(at.zonal[0])} · man ${c(at.manMark[0])}`, a.marking !== 'Not Defined')}
         ${atr('Long shots', a.longShots ? 'Yes' : 'No', c(at.longShots[0]), a.longShots)}
         ${atr('First-time shots', a.firstTime ? 'Yes' : 'No', `needs 3 forwards · ${c(at.firstTime[0])}`, a.firstTime)}
-      </div><div class="xs mut" style="margin-top:6px">On only when won by &gt;15% — opponent skills are estimated, and a lost tactic costs rating.</div>` : '<div class="sm mut">All off until the opponent is scouted — a lost tactic costs rating.</div>',
+      </div><div class="xs mut" style="margin-top:6px">On only when won by &gt;15% — opponent skills are estimated, and a lost tactic costs rating.</div>${(() => { const R = db.model?.atRecord; if (!R) return ''; const NAME = { pressing: 'pressing', offside: 'offside trap', counter: 'counter attack', highBalls: 'high balls', oneOnOne: 'one-on-ones', keeping: 'keeping style', marking: 'marking', longShots: 'long shots', firstTime: 'first-time shots' }; const line = who => AT_KEYS.filter(k => R[who][k]?.used).map(k => `${NAME[k]} ${R[who][k].ok}/${R[who][k].used}${who === 'us' && atDistrust(k) > 1 ? ' (rarely works for us — needs 2× margin)' : ''}`).join(' · '); return `<div class="xs mut" style="margin-top:4px">Confirmed by the commentary / times used — us: ${line('us') || 'no data yet'}. Division: ${line('all') || '—'}.</div>`; })()}` : '<div class="sm mut">All off until the opponent is scouted — a lost tactic costs rating.</div>',
       { right: a ? `${a.won} on` : 'off', open: false });
     const ev = prep().events;
     h += sec('events', 'Match events', ev?.list?.length ? list(ev.list.map(t => ({ t, lvl: 'good' }))) : `<div class="sm mut">${db.prefs.autoEvents ? 'Set automatically when the match is prepared.' : 'Auto events are off.'}</div>`, { right: ev ? `${ev.n} active` : '', open: false });
     const A = Object.fromEntries(Object.entries(plan.attitudes).map(([k, v]) => [k, shown(v)]));
-    h += sec('att', 'Attitude', `<table><tr><th></th><th class="n">W</th><th class="n">D</th><th class="n">L</th></tr>${[['Normal', 'Normal'], ['MOTS', 'Match of the Season'], ['PIC', 'Play it Cool']].map(([k, l]) => `<tr><td>${l}</td><td class="n">${pct(A[k].w)}</td><td class="n">${pct(A[k].d)}</td><td class="n">${pct(A[k].l)}</td></tr>`).join('')}</table><div class="xs mut" style="margin-top:6px">${esc(attitudeTip(plan))}</div><div class="row sp" style="margin-top:6px"><span class="xs mut">MOTS used this season (set if you used one yourself)</span><span class="seg">${[0, 1, 2].map(n => `<button data-motsused="${n}" class="${plan.mots?.used === n ? 'on' : ''}">${n}</button>`).join('')}</span></div>`, { open: !!plan.mots?.use, right: plan.mots ? `MOTS ${plan.mots.used}/${MOTS_PER_SEASON}` : '' });
+    h += sec('att', 'Attitude', `<table><tr><th></th><th class="n">W</th><th class="n">D</th><th class="n">L</th></tr>${[['Normal', 'Normal'], ['MOTS', 'Match of the Season'], ['PIC', 'Play it Cool']].map(([k, l]) => `<tr><td>${l}</td><td class="n">${pct(A[k].w)}</td><td class="n">${pct(A[k].d)}</td><td class="n">${pct(A[k].l)}</td></tr>`).join('')}</table><div class="xs mut" style="margin-top:6px">${esc(attitudeTip(plan))}</div><div class="row sp" style="margin-top:6px"><span class="xs mut">MOTS used this season${plan.mots?.seen ? ` (${plan.mots.seen} seen in our reports)` : ''} — set it if you used one yourself</span><span class="seg">${[0, 1, 2].map(n => `<button data-motsused="${n}" class="${plan.mots?.used === n ? 'on' : ''}">${n}</button>`).join('')}</span></div>`, { open: !!plan.mots?.use, right: plan.mots ? `MOTS ${plan.mots.used}/${MOTS_PER_SEASON}` : '' });
     h += sec('alts', 'Alternatives', `<table><tr><th>Shape</th><th>Style</th><th class="n">W</th><th class="n">xG</th></tr>${plan.alts.map(x => `<tr><td><b>${formLabel(x.f)}</b> <span class="xs mut">${esc(formDetail(x.f))}</span></td><td class="xs">${x.style}/${x.passing}</td><td class="n">${pct(shown(x.r).w)}</td><td class="n">${f1(x.r.xgFor)}–${f1(x.r.xgAg)}</td></tr>`).join('')}</table>`, { right: `${plan.total} tested`, open: false });
     if (plan.current?.issues?.length) h += sec('issues', 'Saved lineup issues', list(plan.current.issues.map(t => ({ t, lvl: 'warn' }))), { open: false });
     return h;
@@ -3713,5 +3829,5 @@ input.txt{flex:1;height:26px;border:1px solid var(--line);background:var(--bg);c
   setInterval(() => { if (!document.hidden || now() - (db.lastPilotAt || 0) > 3600e3) { db.lastPilotAt = now(); autoPilot().catch(e => console.warn('[PM Copilot] autopilot', e)); } }, 30 * 60e3);
   if (GM_getValue('pmc_open', false)) setOpen(true);
   if (window.__PMC_TEST) window.__PMC_TEST.version = VERSION;
-  if (window.__PMC_TEST) window.__PMC_TEST.api = { db: () => db, ingest, fetchDoc, grab, parseSkillPlayers, computePlan, trainingAdvice, clubAdvice, staffAdvice, scoutOpponent, refreshAll, calibration, snapshot, render, setOpen, planEvents, lectureChoice, autoPilot, applyOrders, autoEvents, autoLecture, autoRenew, autoTraining, trainingDue, applyUpcoming, verifyBoard, fetchValues, seasonTable, parseStandingsPage, squadPool, withTalents, slotImpact, talentBonus, staffTrainingTarget, prep, rankCandidates, badgeMarketRows, valuePath, learn, calibrateModel, gradeMatches, learnSummary, recordGrowth, recordDecision, scanMarket, runScan, recruitBoard, fairPriceModel, searchUrl, specialityPlan, youthMoves, autoYouth, autoSpeciality, goalRate, motsPlan, learnShapes, learnRating, learnLanes, attackLanes, slotScore, zonesFor, toStars, calibration, ROLE_W };
+  if (window.__PMC_TEST) window.__PMC_TEST.api = { db: () => db, ingest, fetchDoc, grab, parseSkillPlayers, computePlan, trainingAdvice, clubAdvice, staffAdvice, scoutOpponent, refreshAll, calibration, snapshot, render, setOpen, planEvents, lectureChoice, autoPilot, applyOrders, autoEvents, autoLecture, autoRenew, autoTraining, trainingDue, healthCheck, learnBlend, shown, applyUpcoming, verifyBoard, fetchValues, learnATs, motsSeason, seasonTable, parseStandingsPage, squadPool, withTalents, slotImpact, talentBonus, staffTrainingTarget, prep, rankCandidates, badgeMarketRows, valuePath, learn, calibrateModel, gradeMatches, learnSummary, recordGrowth, recordDecision, scanMarket, runScan, recruitBoard, fairPriceModel, searchUrl, specialityPlan, youthMoves, autoYouth, autoSpeciality, goalRate, motsPlan, learnShapes, learnRating, learnLanes, attackLanes, slotScore, zonesFor, toStars, calibration, ROLE_W };
 })();
