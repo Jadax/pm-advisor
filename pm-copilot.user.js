@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PM Copilot — Planetarium Manager assistant
 // @namespace    pm-copilot
-// @version      0.19.0
+// @version      0.20.1
 // @description  Opponent-aware tactics, match prep autopilot, training, transfers, finance and facilities for pmanager.org — learns from every match. Changelog: github.com/Jadax/pm-advisor
 // @author       Tushant Sharma
 // @license      MIT
@@ -23,7 +23,7 @@
 (() => {
   'use strict';
   if (window.top !== window.self) return;
-  const VERSION = '0.19.0';
+  const VERSION = '0.20.1';
   const PAGE = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
 
   /* =========================================================================
@@ -136,6 +136,7 @@
   const DENOMS = ['Terrible', 'Very Bad', 'Bad', 'Low', 'Passable', 'Good', 'Very Good', 'Excellent', 'Formidable', 'World Class'];
   const DENOM_RE = new RegExp('^(?:[↑↓–—\\-+]\\s*)?(' + DENOMS.slice().sort((a, b) => b.length - a.length).join('|') + ')$', 'i');
   const denomIdx = d => DENOMS.findIndex(x => norm(x) === norm(d));
+  const firstGrade = t => (String(t || '').match(new RegExp('^(' + DENOMS.slice().sort((a, b) => b.length - a.length).join('|') + ')', 'i')) || [])[1] || null;
   const SLOT_CODES = { D: { L: 'LB', C: 'CD', R: 'RB' }, M: { L: 'LM', C: 'CM', R: 'RM' }, F: { L: 'LF', C: 'CF', R: 'RF' } };
   const slotFromCode = code => {
     if (code === 'GK') return { line: 'GK', lane: 'C', code };
@@ -355,7 +356,8 @@
         return {
           id: playerId(link), name: clean(link.textContent), line: pos.line, sides: pos.sides || '',
           age: num(c[at('age')]), fitness: c[at('fitness')] || null, games: num(c[at('gam')]), avgRating: num(c[at('avg')]),
-          goals: num(c[at('gls')]), quality: c[lastAt('quality')] || null, potential: c[lastAt('potential')] || null,
+          // "Quality" became "QualityAffected Quality" (two grades run together in one cell): take the first grade word
+          goals: num(c[at('gls')]), quality: firstGrade(c[ht.map((h, i) => (/^quality/.test(h) && !/potential/.test(h) ? i : -1)).filter(i => i >= 0).pop()]), potential: firstGrade(c[lastAt('potential')]),
         };
       });
       team.rosterAt = now();
@@ -375,11 +377,13 @@
       const sel = row.querySelector('select[name="atributos"]');
       Array.from(sel.options).forEach(o => { if (o.value !== '-1') options.add(clean(o.textContent)); });
       const denoms = toks.filter(t => DENOM_RE.test(t)).map(t => t.match(DENOM_RE)[1]);
+      const grades = $$('.inf-grade[title]', row).map(g => g.getAttribute('title')).filter(t => denomIdx(t) >= 0);
       const last = $$('.tr-last__row', row).map(x => ({ skill: clean(x.querySelector('span')?.textContent), delta: num(x.querySelector('b')?.textContent) }));
       return {
         id: row.dataset.jog || playerId(link), name: clean(link.textContent), line: pos?.line, sides: pos?.sides,
         age: num(toks.find(t => /^\d{2}$/.test(t) && +t >= 15 && +t <= 45)),
-        fit: num(toks.find(t => /^\d{1,3}%$/.test(t))), quality: denoms[0] || null, potential: denoms[1] || null, evolution: denoms[2] || null,
+        // grades are badges (title only) since a site update; the visible-word read silently gave null
+        fit: num(toks.find(t => /^\d{1,3}%$/.test(t))), quality: grades[0] || denoms[0] || null, potential: grades[1] || denoms[1] || null, evolution: denoms[2] || null,
         training: clean(sel.options[sel.selectedIndex]?.textContent), allowed: Array.from(sel.options).map(o => clean(o.textContent)), last,
       };
     });
@@ -693,6 +697,8 @@
   }
 
   // Our own player pages: form, experience, professionalism (feed the model + captain choice).
+  const DENOM_ALT = () => DENOMS.slice().sort((a, b) => b.length - a.length).join('|');
+  const potGrades = ft => ({ now: (ft.match(new RegExp('Potential\\s+(' + DENOM_ALT() + ')(?!\\w)', 'i')) || [])[1] || null, next: (ft.match(new RegExp('Potential\\s*\\(next season\\)\\s*(' + DENOM_ALT() + ')', 'i')) || [])[1] || null });
   function parsePlayerPage(doc, u) {
     const id = u.searchParams.get('jog_id');
     if (!id) return null;
@@ -714,6 +720,7 @@
     db.details[id] = {
       form: (ft.match(/\bForm\s+(Very Bad|Very Good|Bad|Normal|Good)/i) || [])[1] || null, experience: g('Experience'), professionalism: g('Professionalism'), penalties: g('Penalties'),
       integration: g('Team Integration'),
+      potential: potGrades(ft).now, potNext: potGrades(ft).next,
       talent: clean(doc.querySelector('tr.vj-talent font.comentarios')?.textContent) || null,
       happiness: num((ft.match(/Happiness\s+(\d+)%/i) || [])[1]), health: num((ft.match(/Health\s+(\d+)%/i) || [])[1]),
       at: now(),
@@ -748,7 +755,8 @@
       const link = playerLink(r);
       return {
         id: playerId(link), name: clean(link.textContent), age: num(c[2]?.textContent),
-        quality: clean(c[3]?.textContent), potential: clean(c[4]?.textContent),
+        // grade badges carry the word in title; the cell text also holds numbers ("Excellent 74Excellent 75")
+        quality: c[3]?.querySelector('.inf-grade[title]')?.getAttribute('title') || clean(c[3]?.textContent), potential: c[4]?.querySelector('.inf-grade[title]')?.getAttribute('title') || clean(c[4]?.textContent),
         years: num((clean(c[5]?.textContent).match(/(\d+)\s*year/i) || [])[1]), value: num(c[6]?.textContent), wage: num(c[7]?.textContent),
         minutes: num(c[8]?.textContent) || 0, renewable: !!r.querySelector('a[href*="renovar"]'), wontRenew: /won.?t renew/i.test(r.textContent),
       };
@@ -1449,7 +1457,7 @@
     return (db.squad?.players || []).filter(p => !ex.has(p.name) && p.tier !== 3 && !p.suspended && !(p.injuredDays >= Math.max(1, days))).map(p => {
       const t = matchPlayer(p.name, tr, p.id);
       const d = db.details[p.id] || {};
-      return { ...p, fit: t?.fit, potential: t?.potential, quality: t?.quality, form: d.form, experience: d.experience, professionalism: d.professionalism, penalties: d.penalties, happiness: d.happiness, integration: d.integration, talent: d.talent, rate: playerRate(p.id, t?.potential).rate };
+      return { ...p, fit: t?.fit, potential: t?.potential || d.potential, quality: t?.quality, form: d.form, experience: d.experience, professionalism: d.professionalism, penalties: d.penalties, happiness: d.happiness, integration: d.integration, talent: d.talent, potNext: d.potNext, rate: playerRate(p.id, t?.potential || d.potential).rate };
     });
   }
 
@@ -2042,7 +2050,9 @@
       const age = (p.age || 22) + s;
       const prevAge = age - 1;
       // progression is fixed until 21, then loses 25% a year; the shown grade already includes past cuts
-      const rate = base * 0.75 ** Math.max(0, prevAge - Math.max(p.age || 22, 20));
+      const gn = denomIdx(p.potNext || '');
+      const rate = gn >= 0 && s >= 2 ? (p.rate ?? GROWTH[gn]) * (p.trainFactor ?? trainingFactor()) * (p.rate != null && g >= 0 ? GROWTH[gn] / GROWTH[g] : 1) * 0.75 ** (s - 2) // the game's own forecast for next season
+        : base * 0.75 ** Math.max(0, prevAge - Math.max(p.age || 22, 20));
       let pts = rate * SESSIONS;
       // spend points: highest-weight skill below 20 first (physicals train at half efficiency)
       while (pts > 0.01) {
@@ -2122,7 +2132,9 @@
       const sk = {};
       $$('td.sq-c-sk', r).slice(0, 12).forEach((td, i) => (sk[SKILLS[i]] = num(td.textContent)));
       const pos = posFromTokens(leafTexts(r.querySelector('.sq-c-pos') || r.cells[0])) || {};
-      const grades = $$('.sq-qp .inf-grade', r).map(g => g.getAttribute('title'));
+      // three badges since the site added Affected Quality: taking the 2nd as potential read AQ for every listing
+      const gq = r.querySelector('.sq-qp .inf-grade.pm-qv'), gpot = $$('.sq-qp .inf-grade', r).find(g => !g.classList.contains('pm-qv') && !g.classList.contains('pm-av'));
+      const grades = [gq?.getAttribute('title') || null, gpot?.getAttribute('title') || null];
       const tal = r.querySelector('.tlf-talc');
       const cells = Array.from(r.cells).map(c => clean(c.textContent));
       const money = cells.filter(t => /^\$[\d.]+/.test(t)).map(t => num(t.match(/^\$[\d.]+/)[0]));
@@ -2321,8 +2333,40 @@
   }
   const IMPACT_STEPS = [1, 3, 6];
 
+  /* What a signing adds to the team: the best XI re-solved with him in the squad, season by season, on everyone's
+   * projected skills (our players grow too), each slot weighted by how much it decides matches. Comparing him
+   * with one starter in one slot overstated gains whenever the XI could be reshuffled (Franco vs Rymarz played
+   * out of his lane at CF), and ignored that our own players improve. */
+  const XI_CANDIDATES = 200;
+  function xiGains(plan, impact, cands) {
+    const slots = plan.best.xi.map(x => x.slot), H = HORIZON;
+    const w = slots.map(sl => impact.at(sl, 2));
+    const T = db.training?.rows || [];
+    const squad = (db.squad?.players || []).filter(p => p.tier !== 3).map(p => plan.pool.find(q => q.id === p.id) || { ...p, potential: matchPlayer(p.name, T, p.id)?.potential, rate: playerRate(p.id, matchPlayer(p.name, T, p.id)?.potential).rate });
+    // rating of a player at every slot, every season (skills projected for his own line's training)
+    const grid = p => {
+      const path = projectSkills(p, p.line || 'M', H);
+      return path.map(st => slots.map(sl => roleSkill({ sk: st.sk }, sl.line) * posFactor(p, sl) + talentBonus(p.talent, plan, sl.line)));
+    };
+    const G = squad.map(grid);
+    const best = (rows, season) => {
+      const asg = hungarian(slots.map((sl, i) => rows.map(R => 40 - w[i] * R[season][i])));
+      return { val: sum(slots.map((sl, i) => w[i] * rows[asg[i]][season][i])), asg };
+    };
+    const base = Array.from({ length: H + 1 }, (_, season) => best(G, season));
+    const left = seasonLeft();
+    return cands.map(c => {
+      const rows = [...G, grid(c)], ci = rows.length - 1;
+      const gains = [], now = best(rows, 0);
+      for (let season = 0; season <= H; season++) gains.push((season ? best(rows, season).val : now.val) - base[season].val);
+      const si = now.asg.indexOf(ci); // the slot he takes today (−1: doesn't make the XI)
+      const out = si >= 0 ? squad[base[0].asg[si]] : null; // who held that slot
+      const dropped = base[0].asg.map(k => squad[k]).find(p => !now.asg.some(k => k < squad.length && squad[k].id === p.id));
+      return { c, gains, slot: si >= 0 ? slots[si] : null, vs: out, dropped, d5: sum(gains.map((g, i) => g * DISCOUNT ** i * (i ? careerWeight((c.age || 22) + i) : left))), dNow: gains[0], perSeason: avg(gains.slice(1)), rNow: si >= 0 ? rows[ci][0][si] : null, rVs: si >= 0 ? G[base[0].asg[si]][0][si] : null };
+    });
+  }
   // Every listing evaluated at every XI slot of its own line, then the shortlists and a per-slot board.
-  const MIN_UPGRADE_NOW = 0.5; // rating points over the starter today
+  const MIN_UPGRADE_NOW = 0.5; // weighted rating points the XI gains today
   function recruitBoard(plan) {
     if (!plan?.best) return null;
     const listings = Object.values(db.scan?.rows || {});
@@ -2355,8 +2399,20 @@
     for (const e of evals) { e.imp = impact.at(e.slot, Math.max(1, e.d5 / HORIZON)); e.w = e.d5 * e.imp; e.roi = e.cost > 0 ? e.w / (e.cost / 1e6) : e.w * 10; }
     const bestPer = new Map();
     for (const e of evals) if (!bestPer.has(e.c.id) || e.w > bestPer.get(e.c.id).w) bestPer.set(e.c.id, e);
-    // an upgrade must beat the starter today (promotion push: no buying on projected growth alone)
-    const uniq = [...bestPer.values()].filter(e => e.d5 > 0.5 && e.dNow >= MIN_UPGRADE_NOW && e.wageOk && e.c.age <= MAX_BUY_AGE_ANY);
+    // quick screen (one slot, one starter), then the real measure on the most promising: the re-solved XI
+    const short = [...bestPer.values()].filter(e => e.wageOk && e.c.age <= MAX_BUY_AGE_ANY && (e.dNow > 0 || e.d5 > 0)).sort((a, b) => b.w - a.w).slice(0, XI_CANDIDATES);
+    for (const x of xiGains(plan, impact, short.map(e => e.c))) {
+      const e = bestPer.get(x.c.id);
+      if (!x.slot) { e.xiOut = true; continue; }
+      Object.assign(e, { slot: x.slot, vs: x.vs, d5: x.d5, dNow: x.dNow, perSeason: x.perSeason, dropped: x.dropped, rNow: x.rNow, rVs: x.rVs, xi: true });
+      e.v = { ...e.v, now: x.rNow };
+      e.ov = { ...e.ov, now: x.rVs };
+      e.w = x.d5;
+      e.roi = e.cost > 0 ? e.w / (e.cost / 1e6) : e.w * 10;
+      e.perM = e.roi;
+    }
+    // an upgrade must improve the XI today (promotion push: no buying on projected growth alone)
+    const uniq = [...bestPer.values()].filter(e => e.xi && e.d5 > 0.5 && e.dNow >= MIN_UPGRADE_NOW && e.wageOk && e.c.age <= MAX_BUY_AGE_ANY);
     const within = cap => uniq.filter(e => e.expPrice <= cap);
     // the cream only: highest first, one per position, nobody twice
     const taken = new Set();
@@ -2380,7 +2436,7 @@
     const bids = pick(uniq.filter(e => !e.c.free && (e.c.price || 0) <= caps.max && e.expPrice > caps.max && e.c.age <= maxAge)
       .map(e => Object.assign(e, { chance: winChance(caps.max, e.value || (e.fair && fair?.byValue ? e.fair : 0)) })).filter(e => e.chance >= 0.15), e => e.w * e.chance, 3);
     const slots = ours.map(o => {
-      const forSlot = evals.filter(e => e.slot === o.x.slot && e.d5 > 0.5 && e.dNow >= MIN_UPGRADE_NOW && e.wageOk && e.c.age <= MAX_BUY_AGE_ANY && e.expPrice <= caps.max);
+      const forSlot = uniq.filter(e => e.slot === o.x.slot && e.expPrice <= caps.max);
       const one = (key, ok = () => true) => forSlot.filter(ok).sort((a, b) => key(b) - key(a))[0] || null;
       return { slot: o.x.slot, starter: o.x.p, ov: o.v, imp: impact.get(o.x.slot) || 1, best: one(e => e.w, e => e.c.age <= maxAge), value: one(e => e.roi) };
     }).sort((a, b) => b.imp - a.imp);
@@ -2404,6 +2460,9 @@
         row.checkedAt = now();
         const v = num((flatText(doc.body).match(/Contract Length\s*\d+\s*years?\s*Wage\s*\$?[\d.,]+\s*Value\s*\$?([\d.,]+)/i) || flatText(doc.body).match(/\bValue\s*\$([\d.,]+)/) || [])[1]);
         if (isFinite(v) && !row.free) db.playerValues[e.c.id] = { value: v, at: now() };
+        const pg = potGrades(flatText(doc.body));
+        if (pg.now) row.potential = pg.now;
+        if (pg.next) row.potNext = pg.next;
       } catch { /* skip */ }
       await sleep(120);
     }
@@ -3103,7 +3162,20 @@
       (g.samples[gi] = g.samples[gi] || []).push(+(gain / factor).toFixed(4));
       if (g.samples[gi].length > 200) g.samples[gi].shift();
     }
+    // sessions recorded while the training page's grades couldn't be read (potential null): file them once under
+    // the player's current grade, now that it is read again
+    if (!g.backfilled && (db.training?.rows || []).some(r => r.potential)) {
+      for (const [pid, h] of Object.entries(db.history || {})) {
+        const gi = denomIdx((db.training.rows.find(r => r.id === pid) || {}).potential || '');
+        if (gi < 0) continue;
+        for (const x of h.sessions || []) if (!x.potential && x.level < 18 && isFinite(x.full)) { x.potential = DENOMS[gi]; (g.samples[gi] = g.samples[gi] || []).push(x.full); }
+      }
+      for (const k of Object.keys(g.samples)) g.samples[k] = g.samples[k].slice(-200);
+      g.backfilled = true;
+    }
     const fitted = GROWTH_PRIOR.map((p, i) => { const s = g.samples[i] || []; return +((p * GROWTH_PRIOR_WEIGHT + sum(s)) / (GROWTH_PRIOR_WEIGHT + s.length)).toFixed(3); });
+    // a better potential never trains slower: small samples can invert neighbours (Low 0.113 < Bad 0.117) — pool them
+    for (let i = 1; i < fitted.length; i++) if (fitted[i] < fitted[i - 1]) { const m = +((fitted[i] + fitted[i - 1]) / 2).toFixed(3); fitted[i] = fitted[i - 1] = m; for (let j = i - 1; j > 0 && fitted[j] < fitted[j - 1]; j--) { const m2 = +((fitted[j] + fitted[j - 1]) / 2).toFixed(3); fitted[j] = fitted[j - 1] = m2; } }
     db.model = { ...db.model, growth: fitted };
     applyModel(db.model);
     save();
@@ -3208,6 +3280,9 @@
       if (stale.length) add('details', 'warn', `Form/happiness not read in 6 h for: ${stale.join(', ')}.`);
     }
     const tr = db.training;
+    if (tr?.rows?.length && tr.rows.filter(r => !r.potential).length > tr.rows.length / 2) add('potential', 'bad', `Potential not read for ${tr.rows.filter(r => !r.potential).length}/${tr.rows.length} players on the training page — projections fall back to an average grade.`);
+    const L = Object.values(db.scan?.rows || {});
+    if (L.length > 30 && L.filter(r => !r.potential).length > L.length / 2) add('mktpot', 'bad', `Potential not read for most transfer listings (${L.filter(r => !r.potential).length}/${L.length}).`);
     if (tr) {
       const off = trainingAdvice().rows.filter(r => r.mismatch).map(r => `${surname(r.p.name)} (${r.cur} → ${r.rec})`);
       if (off.length) add('training', 'warn', `Training orders not as planned: ${off.join(', ')}.`);
@@ -3663,17 +3738,17 @@ input.txt{flex:1;height:26px;border:1px solid var(--line);background:var(--bg);c
       const sg = v => `${v >= 0 ? '+' : ''}${f1(v)}`;
       const money = v => (v >= 1e6 ? `$${(v / 1e6).toFixed(2)}M` : `$${Math.round(v / 1e3)}k`);
       const tag = e => [e.c.free ? chip('free agent', 'g') : '', e.c.age >= 30 ? chip('short-term', 'w') : '', e.cheap && e.cheap >= 1.4 ? chip('game undervalues him', 'g') : '', !e.c.free && !e.value ? chip('value unknown', 'w') : ''].join('');
-      const row = e => `<tr title="${esc(`vs ${e.vs.name}: now ${f1(e.ov.now)}, at 26 ${f1(e.ov.at26)}`)}"><td><a href="/ver_jogador.asp?jog_id=${esc(e.c.id)}" style="color:inherit;font-weight:600">${esc(e.c.name)}</a><div class="xs mut">${e.c.age} · ${esc(e.c.line)}${esc(e.c.sides || '')} · ${esc(e.c.quality || '?')}/${esc(e.c.potential || '?')}${e.c.talent ? ' · ' + esc(e.c.talent) : ''}${e.c.deadline ? ' · ends ' + esc(e.c.deadline.slice(0, 8)) : ''}</div>${tag(e) ? `<div style="margin-top:2px">${tag(e)}</div>` : ''}</td><td>${chip(e.slot.code)}<div class="xs mut">${esc(surname(e.vs.name))}</div></td><td class="n"><b style="color:var(--good)">${sg(e.d5)}</b><div class="xs mut">now ${f1(e.v.now)} vs ${f1(e.ov.now)}</div></td><td class="n" title="Expected winning bid: the ask (an auction floor) or about half his Value — what completed transfers typically went for. Free agents: 12-week signing fee.">≈${money(e.expPrice)}<div class="xs mut">${e.c.free ? 'signing fee' : `ask ${money(e.c.price || 0)}${e.value ? ` · value ${money(e.value)}` : ''}`}${e.c.wage ? ` · ${money(e.c.wage)}/wk` : ''}</div></td></tr>`;
-      const tbl = arr => (arr.length ? `<table><tr><th>Player</th><th>As</th><th class="n">5 seasons</th><th class="n">Expect</th></tr>${arr.map(row).join('')}</table>` : '<div class="sm mut">Nothing that improves your XI at this price yet.</div>');
+      const row = e => `<tr title="${esc(`vs ${e.vs.name}: now ${f1(e.ov.now)}, at 26 ${f1(e.ov.at26)}`)}"><td><a href="/ver_jogador.asp?jog_id=${esc(e.c.id)}" style="color:inherit;font-weight:600">${esc(e.c.name)}</a><div class="xs mut">${e.c.age} · ${esc(e.c.line)}${esc(e.c.sides || '')} · ${esc(e.c.quality || '?')}/${esc(e.c.potential || '?')}${e.c.talent ? ' · ' + esc(e.c.talent) : ''}${e.c.deadline ? ' · ends ' + esc(e.c.deadline.slice(0, 8)) : ''}</div>${tag(e) ? `<div style="margin-top:2px">${tag(e)}</div>` : ''}</td><td>${chip(e.slot.code)}<div class="xs mut">${esc(surname((e.dropped || e.vs).name))} out</div></td><td class="n"><b style="color:var(--good)">${sg(e.dNow)}</b><div class="xs mut">${isFinite(e.perSeason) ? `${sg(e.perSeason)}/season · ` : ''}${f1(e.v.now)} vs ${f1(e.ov.now)}</div></td><td class="n" title="Expected winning bid: the ask (an auction floor) or about half his Value — what completed transfers typically went for. Free agents: 12-week signing fee.">≈${money(e.expPrice)}<div class="xs mut">${e.c.free ? 'signing fee' : `ask ${money(e.c.price || 0)}${e.value ? ` · value ${money(e.value)}` : ''}`}${e.c.wage ? ` · ${money(e.c.wage)}/wk` : ''}</div></td></tr>`;
+      const tbl = arr => (arr.length ? `<table><tr><th>Player</th><th>As</th><th class="n" title="How much better the best XI gets with him: today, and on average per season over the next five (our players grow too)">XI gain</th><th class="n">Expect</th></tr>${arr.map(row).join('')}</table>` : '<div class="sm mut">Nothing that improves your XI at this price yet.</div>');
       h += sec('recruit', 'Recruitment', `<div class="row sp wr"><span class="sm">Funds <b>${money(B.caps.funds)}</b> · up to <b>${money(B.caps.max)}</b> per player</span><span class="seg">${[0.2, 0.35, 0.5].map(p => `<button data-buypct="${p}" class="${Math.abs(B.caps.pct - p) < 0.01 ? 'on' : ''}">${Math.round(p * 100)}%</button>`).join('')}</span></div>
         <div class="row" style="margin-top:6px"><button class="btn p" data-act="scan" ${busy ? 'disabled' : ''}>${B.scannedAt ? 'Rescan market' : 'Scan market'}</button><span class="xs mut">${B.n} live listings${B.scannedAt ? ' · ' + ago(B.scannedAt) : ''}</span></div>
-        <div class="xs mut" style="margin-top:6px">Every position and the free-agent list, each player rated in every slot of his line against your starter over 5 seasons, weighted by how much that slot decides matches. Cost = expected winning bid (≈ half his Value, never below the ask) + a season of wages.</div>`);
+        <div class="xs mut" style="margin-top:6px">Every position and the free-agent list. For each candidate the best XI is re-solved with him in the squad — today and for each of the next five seasons, on everyone's projected skills — and the gain is weighted by how much each slot decides matches. “Out” = who drops out of the XI. Cost = expected winning bid (≈ half his Value, never below the ask) + a season of wages.</div>`);
       h += sec('rbest', 'Best buys', `<div class="row sp" style="margin-bottom:6px"><span class="xs mut">Long-term upgrades, priority positions first, one per position.</span><span class="seg">${[[25, '≤25'], [29, '≤29'], [99, 'Any age']].map(([a, l]) => `<button data-maxage="${a}" class="${B.maxAge === a ? 'on' : ''}">${l}</button>`).join('')}</span></div>` + tbl(B.best) + (!B.best.length && B.stretch.length ? `<div class="xs mut" style="margin-top:6px">Real upgrades start above your cap (Worth saving for, from ≈${money(Math.min(...B.stretch.map(e => e.expPrice)))}) — a higher share of funds would cover them.</div>` : ''), { right: `≤ ${money(B.caps.max)}` });
       if (B.minNational && !/no limit/i.test(B.minNational)) h += `<div class="sec"><div class="sm" style="color:var(--warn)">Your federation now requires national players: ${esc(B.minNational)}. Check nationalities before buying.</div></div>`;
       h += sec('rvalue', 'Best value', tbl(B.value) + '<div class="xs mut" style="margin-top:6px">Most upgrade per $1M of <b>net</b> cost — the fee minus what he still sells for in 3 seasons (young players keep their value, 30+ lose it), plus a season of wages. Free agents and short-term fixes (30–31) included; nobody likely to retire before next season — this season only counts for the rounds left.</div>', { right: 'return per $' });
       if (B.bids?.length) h += sec('rbids', 'Bid up to your cap', tbl(B.bids) + `<div class="xs mut" style="margin-top:6px">Their ask fits your cap but auctions usually end higher (≈ half the Value). Bid at most ${money(B.caps.max)}: ${B.bids.map(e => `${esc(surname(e.c.name))} ~${Math.round(e.chance * 100)}%`).join(' · ')} chance to win at that price.</div>`, { right: 'chance at cap' });
       if (B.stretch.length) h += sec('rstretch', 'Worth saving for', tbl(B.stretch) + '<div class="xs mut" style="margin-top:6px">Bigger long-term upgrades above your cap (under 30).</div>', { right: `> ${money(B.caps.max)}`, open: false });
-      h += sec('rslots', 'By position', `<table><tr><th>Slot</th><th>Starter</th><th>Best</th><th>Value</th></tr>${B.slots.map(s => `<tr><td>${chip(s.slot.code)}<div class="xs mut" title="How much this slot decides matches (1 = average)">×${s.imp.toFixed(1)}</div></td><td class="xs">${esc(surname(s.starter.name))}<div class="mut">${f1(s.ov.now)} → ${f1(s.ov.at26)}</div></td>${[s.best, s.value].map(e => `<td class="xs">${e ? `<a href="/ver_jogador.asp?jog_id=${esc(e.c.id)}" style="color:inherit;font-weight:600">${esc(surname(e.c.name))}</a> <span style="color:var(--good)">${sg(e.d5)}</span><div class="mut">now ${f1(e.v.now)} vs ${f1(e.ov.now)} · ${e.c.age}y · ≈${money(e.expPrice)}</div>` : '<span class="mut">—</span>'}</td>`).join('')}</tr>`).join('')}</table><div class="xs mut" style="margin-top:6px">Ordered by how much each position decides matches in the current model (×1 = average).</div>`, { open: false });
+      h += sec('rslots', 'By position', `<table><tr><th>Slot</th><th>Starter</th><th>Best</th><th>Value</th></tr>${B.slots.map(s => `<tr><td>${chip(s.slot.code)}<div class="xs mut" title="How much this slot decides matches (1 = average)">×${s.imp.toFixed(1)}</div></td><td class="xs">${esc(surname(s.starter.name))}<div class="mut">${f1(s.ov.now)} → ${f1(s.ov.at26)}</div></td>${[s.best, s.value].map(e => `<td class="xs">${e ? `<a href="/ver_jogador.asp?jog_id=${esc(e.c.id)}" style="color:inherit;font-weight:600">${esc(surname(e.c.name))}</a> <span style="color:var(--good)">${sg(e.dNow)}</span><div class="mut">${f1(e.v.now)} vs ${f1(e.ov.now)} · ${e.c.age}y · ≈${money(e.expPrice)}</div>` : '<span class="mut">—</span>'}</td>`).join('')}</tr>`).join('')}</table><div class="xs mut" style="margin-top:6px">Ordered by how much each position decides matches in the current model (×1 = average).</div>`, { open: false });
     }
     if (db.market?.rows?.length) {
       const ranked = rankCandidates(db.market.rows, plan);
@@ -3829,5 +3904,5 @@ input.txt{flex:1;height:26px;border:1px solid var(--line);background:var(--bg);c
   setInterval(() => { if (!document.hidden || now() - (db.lastPilotAt || 0) > 3600e3) { db.lastPilotAt = now(); autoPilot().catch(e => console.warn('[PM Copilot] autopilot', e)); } }, 30 * 60e3);
   if (GM_getValue('pmc_open', false)) setOpen(true);
   if (window.__PMC_TEST) window.__PMC_TEST.version = VERSION;
-  if (window.__PMC_TEST) window.__PMC_TEST.api = { db: () => db, ingest, fetchDoc, grab, parseSkillPlayers, computePlan, trainingAdvice, clubAdvice, staffAdvice, scoutOpponent, refreshAll, calibration, snapshot, render, setOpen, planEvents, lectureChoice, autoPilot, applyOrders, autoEvents, autoLecture, autoRenew, autoTraining, trainingDue, healthCheck, learnBlend, shown, applyUpcoming, verifyBoard, fetchValues, learnATs, motsSeason, seasonTable, parseStandingsPage, squadPool, withTalents, slotImpact, talentBonus, staffTrainingTarget, prep, rankCandidates, badgeMarketRows, valuePath, learn, calibrateModel, gradeMatches, learnSummary, recordGrowth, recordDecision, scanMarket, runScan, recruitBoard, fairPriceModel, searchUrl, specialityPlan, youthMoves, autoYouth, autoSpeciality, goalRate, motsPlan, learnShapes, learnRating, learnLanes, attackLanes, slotScore, zonesFor, toStars, calibration, ROLE_W };
+  if (window.__PMC_TEST) window.__PMC_TEST.api = { db: () => db, ingest, fetchDoc, grab, parseSkillPlayers, computePlan, trainingAdvice, clubAdvice, staffAdvice, scoutOpponent, refreshAll, calibration, snapshot, render, setOpen, planEvents, lectureChoice, autoPilot, applyOrders, autoEvents, autoLecture, autoRenew, autoTraining, trainingDue, xiGains, projectSkills, healthCheck, learnBlend, shown, applyUpcoming, verifyBoard, fetchValues, learnATs, motsSeason, seasonTable, parseStandingsPage, squadPool, withTalents, slotImpact, talentBonus, staffTrainingTarget, prep, rankCandidates, badgeMarketRows, valuePath, learn, calibrateModel, gradeMatches, learnSummary, recordGrowth, recordDecision, scanMarket, runScan, recruitBoard, fairPriceModel, searchUrl, specialityPlan, youthMoves, autoYouth, autoSpeciality, goalRate, motsPlan, learnShapes, learnRating, learnLanes, attackLanes, slotScore, zonesFor, toStars, calibration, ROLE_W };
 })();
