@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PM Copilot — Planetarium Manager assistant
 // @namespace    pm-copilot
-// @version      0.22.0
+// @version      0.23.0
 // @description  Opponent-aware tactics, match prep autopilot, training, transfers, finance and facilities for pmanager.org — learns from every match. Changelog: github.com/Jadax/pm-advisor
 // @author       Tushant Sharma
 // @license      MIT
@@ -23,7 +23,7 @@
 (() => {
   'use strict';
   if (window.top !== window.self) return;
-  const VERSION = '0.22.0';
+  const VERSION = '0.23.0';
   const PAGE = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
 
   /* =========================================================================
@@ -2366,6 +2366,23 @@
       return { c, gains, slot: si >= 0 ? slots[si] : null, vs: out, dropped, d5: sum(gains.map((g, i) => g * DISCOUNT ** i * (i ? careerWeight((c.age || 22) + i) : left))), dNow: gains[0], perSeason: avg(gains.slice(1)), rNow: si >= 0 ? rows[ci][0][si] : null, rVs: si >= 0 ? G[base[0].asg[si]][0][si] : null };
     });
   }
+  /* Squad depth: what a signing adds when a starter is missing (injury, suspension, rest). The best XI is
+   * re-solved with each starter out in turn, with and without the candidate; the gain is averaged over those
+   * eleven cases. A cheap player who never starts can still be worth a lot here (Slater, 52, covers CM today). */
+  function depthGains(plan, impact, cands) {
+    const slots = plan.best.xi.map(x => x.slot), w = slots.map(sl => impact.at(sl, 2));
+    const squad = (db.squad?.players || []).filter(p => p.tier !== 3);
+    const row = p => slots.map(sl => roleSkill(p, sl.line) * posFactor(p, sl) + talentBonus(p.talent, plan, sl.line));
+    const G = squad.map(row);
+    const best = rows => { if (rows.length < slots.length) return -Infinity; const asg = hungarian(slots.map((sl, i) => rows.map(R => 40 - w[i] * R[i]))); return sum(slots.map((sl, i) => w[i] * rows[asg[i]][i])); };
+    const outs = plan.best.xi.map(x => squad.findIndex(p => p.id === x.p.id)).filter(i => i >= 0);
+    const base = outs.map(o => best(G.filter((_, j) => j !== o)));
+    return cands.map(c => {
+      const rc = row(c);
+      const gains = outs.map((o, k) => best([...G.filter((_, j) => j !== o), rc]) - base[k]);
+      return { c, depth: avg(gains), worst: Math.max(...gains) };
+    });
+  }
   // Every listing evaluated at every XI slot of its own line, then the shortlists and a per-slot board.
   // The game's Quality from skills: 6.2 + 1.41·Σprimaries + 0.52·Σsecondaries + 0.19·Σphysicals (matches our 17
   // players within ~1). Grades are 10-point bands starting at x1 (Good 60, Very Good 61–70, Excellent 71–80…).
@@ -2476,6 +2493,16 @@
       .filter(e => e.plainPeak >= MIN_RATING_GAIN).sort((a, b) => b.future - a.future)
       // the best of each line first (forwards weigh most in the model and would take every place), then by rank
       .reduce((acc, e, _, all) => { if (!acc.length) { const firsts = ['GK', 'D', 'M', 'F'].map(l => all.find(x => (x.slot?.line || x.c.line) === l)).filter(Boolean); acc.push(...firsts.sort((a, b) => b.future - a.future)); } if (acc.length < 6 && !acc.includes(e)) acc.push(e); return acc; }, []).slice(0, 6);
+    // depth: cheap cover for any starter, ranked by gain per $1M of expected cost (one per line)
+    const depthPool = [...bestPer.values()].filter(e => e.wageOk && e.c.age <= MAX_BUY_AGE_ANY && e.expPrice <= budget);
+    const dg = depthGains(plan, impact, depthPool.map(e => e.c));
+    const depth = (() => {
+      const rows = dg.map((d, i) => Object.assign(depthPool[i], { depth: d.depth, coverMax: d.worst })).filter(e => e.depth >= 0.15 && e.coverMax >= MIN_RATING_GAIN * 0.5)
+        .map(e => Object.assign(e, { depthPerM: e.depth / Math.max(0.05, (e.cost > 0 ? e.cost : e.expPrice) / 1e6) }));
+      const out = [], used = new Set();
+      for (const e of rows.sort((a, b) => b.depthPerM - a.depthPerM)) { if (out.length >= 4) break; const l = e.c.line; if (used.has(l)) continue; used.add(l); out.push(e); }
+      return out;
+    })();
     const targetQ = db.prefs.targetQ || 81; // Formidable
     const qCache = new Map(), qOf = (p, line) => { const k = p.id + line; if (!qCache.has(k)) qCache.set(k, qualityBy(p, line)); return qCache.get(k); };
     const market = [...bestPer.values()].filter(e => e.wageOk && e.c.age <= Math.max(maxAge, PLAN_AGE) && e.expPrice <= budget);
@@ -2489,7 +2516,7 @@
       if (!routes.length) routes = all.filter(r => r.q28 >= q28 + 3).sort((a, b) => b.q28 - a.q28 || a.e.expPrice - b.e.expPrice).slice(0, 1).map(r => ({ ...r, closest: true }));
       return { slot: x.slot, p: pl, qNow, q28, ok: q28 >= targetQ, routes };
     });
-    return { caps, fair, best, value, stretch, bids, prospects, squadPlan, targetQ, budget, slots, maxAge, all: uniq, minNational: db.academy?.minNational, n: cands.length, scannedAt: db.scan?.at };
+    return { caps, fair, best, value, stretch, bids, prospects, squadPlan, depth, targetQ, budget, slots, maxAge, all: uniq, minNational: db.academy?.minNational, n: cands.length, scannedAt: db.scan?.at };
   }
 
   /* Player page: the game's Value, and whether he can still be bought — "Currently in transfer list" for an
@@ -3797,6 +3824,7 @@ input.txt{flex:1;height:26px;border:1px solid var(--line);background:var(--bg);c
       if (B.minNational && !/no limit/i.test(B.minNational)) h += `<div class="sec"><div class="sm" style="color:var(--warn)">Your federation now requires national players: ${esc(B.minNational)}. Check nationalities before buying.</div></div>`;
       h += sec('rvalue', 'Best value', tbl(B.value) + '<div class="xs mut" style="margin-top:6px">Most upgrade per $1M of <b>net</b> cost — the fee minus what he still sells for in 3 seasons (young players keep their value, 30+ lose it), plus a season of wages. Free agents and short-term fixes (30–31) included; nobody likely to retire before next season — this season only counts for the rounds left.</div>', { right: 'return per $' });
       if (B.bids?.length) h += sec('rbids', 'Bid up to your cap', tbl(B.bids) + `<div class="xs mut" style="margin-top:6px">Their ask fits your cap but auctions usually end higher (≈ half the Value). Bid at most ${money(B.caps.max)}: ${B.bids.map(e => `${esc(surname(e.c.name))} ~${Math.round(e.chance * 100)}%`).join(' · ')} chance to win at that price.</div>`, { right: 'chance at cap' });
+      if (B.depth) h += sec('rdepth', 'Squad depth', B.depth.length ? `<table><tr><th>Player</th><th class="n" title="Average gain to the best XI when one starter is missing, over every starter">Cover gain</th><th class="n">Expect</th></tr>${B.depth.map(e => `<tr><td><a href="/ver_jogador.asp?jog_id=${esc(e.c.id)}" style="color:inherit;font-weight:600">${esc(e.c.name)}</a><div class="xs mut">${e.c.age} · ${esc(e.c.line)}${esc(e.c.sides || '')} · Q${Math.round(qualityOf(e.c.sk, e.c.line))} · pot ${esc(e.c.potential || '?')}</div></td><td class="n"><b style="color:var(--good)">${sg(e.depth)}</b><div class="xs mut">up to ${sg(e.coverMax)}</div></td><td class="n">≈${money(e.expPrice)}<div class="xs mut">${e.c.free ? 'signing fee' : `ask ${money(e.c.price || 0)}`}${e.c.wage ? ` · ${money(e.c.wage)}/wk` : ''}</div></td></tr>`).join('')}</table><div class="xs mut" style="margin-top:6px">Cover for injuries, suspensions and rest: the best XI re-solved with each starter missing in turn, with and without him; average gain, and the biggest single case. Best gain per $1M of net cost, one per line, within the budget below.</div>` : '<div class="sm mut">Nobody within budget improves the cover.</div>', { right: 'cover', open: true });
       const budgetSeg = `<span class="seg">${Object.entries(PLAN_BUDGETS).map(([k, l]) => `<button data-planb="${k}" class="${(db.prefs.planBudget || 'cap') === k ? 'on' : ''}">${l}</button>`).join('')}</span>`;
       if (B.squadPlan?.length) {
         const short = B.squadPlan.filter(r => !r.ok).length;
@@ -3961,5 +3989,5 @@ input.txt{flex:1;height:26px;border:1px solid var(--line);background:var(--bg);c
   setInterval(() => { if (!document.hidden || now() - (db.lastPilotAt || 0) > 3600e3) { db.lastPilotAt = now(); autoPilot().catch(e => console.warn('[PM Copilot] autopilot', e)); } }, 30 * 60e3);
   if (GM_getValue('pmc_open', false)) setOpen(true);
   if (window.__PMC_TEST) window.__PMC_TEST.version = VERSION;
-  if (window.__PMC_TEST) window.__PMC_TEST.api = { db: () => db, ingest, fetchDoc, grab, parseSkillPlayers, computePlan, trainingAdvice, clubAdvice, staffAdvice, scoutOpponent, refreshAll, calibration, snapshot, render, setOpen, planEvents, lectureChoice, autoPilot, applyOrders, autoEvents, autoLecture, autoRenew, autoTraining, trainingDue, qualityOf, qualityBy, xiGains, projectSkills, healthCheck, learnBlend, shown, applyUpcoming, verifyBoard, fetchValues, learnATs, motsSeason, seasonTable, parseStandingsPage, squadPool, withTalents, slotImpact, talentBonus, staffTrainingTarget, prep, rankCandidates, badgeMarketRows, valuePath, learn, calibrateModel, gradeMatches, learnSummary, recordGrowth, recordDecision, scanMarket, runScan, recruitBoard, fairPriceModel, searchUrl, specialityPlan, youthMoves, autoYouth, autoSpeciality, goalRate, motsPlan, learnShapes, learnRating, learnLanes, attackLanes, slotScore, zonesFor, toStars, calibration, ROLE_W };
+  if (window.__PMC_TEST) window.__PMC_TEST.api = { db: () => db, ingest, fetchDoc, grab, parseSkillPlayers, computePlan, trainingAdvice, clubAdvice, staffAdvice, scoutOpponent, refreshAll, calibration, snapshot, render, setOpen, planEvents, lectureChoice, autoPilot, applyOrders, autoEvents, autoLecture, autoRenew, autoTraining, trainingDue, depthGains, qualityOf, qualityBy, xiGains, projectSkills, healthCheck, learnBlend, shown, applyUpcoming, verifyBoard, fetchValues, learnATs, motsSeason, seasonTable, parseStandingsPage, squadPool, withTalents, slotImpact, talentBonus, staffTrainingTarget, prep, rankCandidates, badgeMarketRows, valuePath, learn, calibrateModel, gradeMatches, learnSummary, recordGrowth, recordDecision, scanMarket, runScan, recruitBoard, fairPriceModel, searchUrl, specialityPlan, youthMoves, autoYouth, autoSpeciality, goalRate, motsPlan, learnShapes, learnRating, learnLanes, attackLanes, slotScore, zonesFor, toStars, calibration, ROLE_W };
 })();
