@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PM Copilot — Planetarium Manager assistant
 // @namespace    pm-copilot
-// @version      0.23.0
+// @version      0.24.0
 // @description  Opponent-aware tactics, match prep autopilot, training, transfers, finance and facilities for pmanager.org — learns from every match. Changelog: github.com/Jadax/pm-advisor
 // @author       Tushant Sharma
 // @license      MIT
@@ -23,7 +23,7 @@
 (() => {
   'use strict';
   if (window.top !== window.self) return;
-  const VERSION = '0.23.0';
+  const VERSION = '0.24.0';
   const PAGE = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
 
   /* =========================================================================
@@ -1250,7 +1250,7 @@
 
   function sideMult(z, s) {
     const fx = STYLE_FX[s.style] || STYLE_FX.Normal;
-    const g = (1 + 0.02 * (s.atWon || 0)) * (s.home ? 1.03 : 1);
+    const g = s.home ? 1.03 : 1; // advanced tactics act on goals in simulate (learned, AT_FX)
     // manual §14: MOTS adds "almost a whole star" to every zone rating, Play it Cool takes as much off
     const att = s.attitude === 'MOTS' ? MOTS_STARS : s.attitude === 'PIC' ? -MOTS_STARS : 0;
     const o = { def: {}, mid: {}, att: {}, n: z.n, gk: z.gk * fx.d * g };
@@ -1397,6 +1397,42 @@
     save();
     return fx;
   }
+  /* Value of a working advanced tactic, fitted on every stored report: goals ~ zones + our confirmed tactics +
+   * theirs (Poisson). 2026-11-18, 406 sides: our own +0.049 ±0.029, the opponent's −0.183 ±0.042 on our goals.
+   * Confirmations partly coincide with dominance, so the fit is halved and capped. Our expected confirmed count
+   * = tactics on × our confirmation rate (shrunk to the division's); opponents' = their recent average. */
+  const AT_FX0 = { own: 0.02, opp: 0.05 };
+  const atFx = () => db.model?.atFx || AT_FX0;
+  function atWorkRate() {
+    const R = db.model?.atRecord, u = sum(Object.values(R?.us || {}).map(x => x.used)), uo = sum(Object.values(R?.us || {}).map(x => x.ok));
+    const a = sum(Object.values(R?.all || {}).map(x => x.used)), ao = sum(Object.values(R?.all || {}).map(x => x.ok));
+    const prior = a ? ao / a : 0.5;
+    return (uo + 10 * prior) / (u + 10);
+  }
+  const atEff = side => (isFinite(side.atConf) ? side.atConf : (side.atWon || 0) * atWorkRate());
+  const confirmedATs = s => Object.values(AT_CONFIRM).filter(re => re.test((s.atMsgs || []).join(' '))).length;
+  function learnATValue() {
+    const rows = [];
+    for (const r of Object.values(db.reports)) {
+      if (!r.score || r.sides?.length !== 2 || !r.sides.every(x => fullZones(x) && x.moves)) continue;
+      const m = o => (o.L + o.C + o.R) / 3;
+      for (let i = 0; i < 2; i++) { const a = r.sides[i], d = r.sides[1 - i]; rows.push({ g: r.score[i], x: [1, m(a.zones.att), m(d.zones.def), m(a.zones.mid) - m(d.zones.mid), d.zones.gk || 0, i === 0 ? 1 : 0, confirmedATs(a), confirmedATs(d)] }); }
+    }
+    if (rows.length < 120) return null;
+    const k = 8; let b = new Array(k).fill(0);
+    for (let it = 0; it < 30; it++) {
+      const A = Array.from({ length: k }, () => new Array(k).fill(0)), z = new Array(k).fill(0);
+      for (const r of rows) { const eta = r.x.reduce((t, v, j) => t + v * b[j], 0), mu = Math.exp(eta), zz = eta + (r.g - mu) / mu; for (let i = 0; i < k; i++) { z[i] += r.x[i] * mu * zz; for (let j = 0; j < k; j++) A[i][j] += r.x[i] * mu * r.x[j]; } }
+      for (let i = 0; i < k; i++) { let p = i; for (let q = i + 1; q < k; q++) if (Math.abs(A[q][i]) > Math.abs(A[p][i])) p = q; [A[i], A[p]] = [A[p], A[i]]; [z[i], z[p]] = [z[p], z[i]]; for (let q = i + 1; q < k; q++) { const f = A[q][i] / A[i][i]; for (let c = i; c < k; c++) A[q][c] -= f * A[i][c]; z[q] -= f * z[i]; } }
+      const nb = new Array(k).fill(0);
+      for (let i = k - 1; i >= 0; i--) nb[i] = (z[i] - sum(A[i].slice(i + 1).map((v, j) => v * nb[i + 1 + j]))) / A[i][i];
+      if (!nb.every(isFinite)) return null;
+      b = nb;
+    }
+    const fx = { own: +clamp(0.5 * b[6], 0, 0.06).toFixed(3), opp: +clamp(-0.5 * b[7], 0, 0.12).toFixed(3), n: rows.length, rawOwn: +b[6].toFixed(3), rawOpp: +b[7].toFixed(3) };
+    db.model = { ...db.model, atFx: fx };
+    return fx;
+  }
   function simulate(us, them) {
     const a = sideMult(us.z, us), b = sideMult(them.z, them);
     for (const l of LANES) {
@@ -1410,7 +1446,9 @@
     }
     // what the zone ratings miss about each shape, learned from the division's reports (1 = none)
     const fa = shapeFx(us.shape), fb = shapeFx(them.shape);
-    const xgFor = goalRate(a, b, us.passing, ME, us.pref) * fa.att * fb.def, xgAg = goalRate(b, a, them.passing, ME, them.pref) * fb.att * fa.def;
+    // working advanced tactics: own ones lift our scoring a little, the opponent's cut it a lot (406 report sides)
+    const F = atFx(), eu = atEff(us), et = atEff(them);
+    const xgFor = goalRate(a, b, us.passing, ME, us.pref) * fa.att * fb.def * Math.exp(F.own * eu - F.opp * et), xgAg = goalRate(b, a, them.passing, ME, them.pref) * fb.att * fa.def * Math.exp(F.own * et - F.opp * eu);
     return { xgFor, xgAg, poss: sigmoid((midOf(a) - midOf(b)) / ME.K_MID), ...wdl(xgFor, xgAg) };
   }
 
@@ -1467,6 +1505,8 @@
   // Everything we know about the opponent: real ME zone ratings from their reports, quality grades, ATs used.
   // A team's history (newest first) from the report database, and its recency-weighted ME zone stars
   // with each match's style and home bonus undone.
+  // a team's confirmed advanced tactics per match, last 6 reports read with commentary (0 when unknown)
+  const oppATs = name => { const h = name ? teamHistory(name).filter(x => x.s.moves).slice(0, 6) : []; return h.length ? avg(h.map(x => confirmedATs(x.s))) : 0; };
   function teamHistory(name) {
     return Object.values(db.reports)
       .filter(r => r.sides.some(s => norm(s.team) === norm(name)))
@@ -1571,7 +1611,7 @@
     const refXI = bestXI(pool, formFromString('4-4-2'));
     const opp = opponentModel(cal, zonesFor(refXI));
     const home = db.next ? db.next.weAreHome !== false : true;
-    const oppSide = { z: opp?.z || toStars(zonesFor(refXI), cal), style: opp?.style || 'Normal', passing: opp?.passing || 'Short', home: !home, attitude: 'Normal', atWon: 0, shape: shapeKey(opp?.form) };
+    const oppSide = { z: opp?.z || toStars(zonesFor(refXI), cal), style: opp?.style || 'Normal', passing: opp?.passing || 'Short', home: !home, attitude: 'Normal', atWon: 0, atConf: oppATs(opponentName()), shape: shapeKey(opp?.form) };
     const pts = db.next?.points;
     // grade-based estimates need a clear margin; observed (scouted) skills only a small one for hidden decimals
     const safe = opp?.scoutedN >= 8 ? 0.05 : 0.15;
@@ -1647,7 +1687,7 @@
     const form = formFromString(modeOf(h.slice(0, 5).map(x => x.formation)) || '4-4-2');
     z.n = { D: {}, M: {}, F: {} };
     for (const line of ['D', 'M', 'F']) for (const l of LANES) z.n[line][l] = form[line][l];
-    return { z, style: modeOf(h.slice(0, 3).map(x => x.style)) || 'Normal', passing: modeOf(h.slice(0, 3).map(x => x.passing)) || 'Short', home: !home, attitude: 'Normal', atWon: 0, shape: shapeKey(form), known: h.length > 0 };
+    return { z, style: modeOf(h.slice(0, 3).map(x => x.style)) || 'Normal', passing: modeOf(h.slice(0, 3).map(x => x.passing)) || 'Short', home: !home, attitude: 'Normal', atWon: 0, atConf: oppATs(opp), shape: shapeKey(form), known: h.length > 0 };
   }
   /* MOTS where it moves the final table most. The rest of the league season is simulated (every remaining
    * fixture, ours and the others', each side as its reports show it) for each way of spending what is left;
@@ -2023,6 +2063,9 @@
     if (/attack-minded/.test(t)) return (style === 'Attacking' ? 2 : style === 'Defensive' ? -2 : 0) * GS;
     if (/defense-minded/.test(t)) return (style === 'Defensive' ? 2 : style === 'Attacking' ? -2 : 0) * GS;
     // events: a starter vs a sub brought on from 60′ (all our scripted subs are)
+    // we play Easy (soft) tackling unless the XI has 2+ Aggressive players (applyPlan)
+    if (/coward/.test(t)) return 2 * GS;
+    if (/aggressive/.test(t)) return -2 * GS;
     if (/motivated starter/.test(t)) return (role === 'starter' ? 2 : -2) * GS;
     if (/substitute hero/.test(t)) return (role === 'starter' ? -2 : 2) * GS;
     const hit = Object.entries(TALENT_AT).find(([k]) => t.includes(k));
@@ -2656,7 +2699,8 @@
     set('Pressing', a.pressing); set('Offside_Trap', yn(a.offside)); set('Counter_Attack', yn(a.counter));
     set('High_Balls', yn(a.highBalls)); set('One_on_Ones', yn(a.oneOnOne)); set('Keeping_Style', a.keeping);
     set('Marking', a.marking); set('RematesLonge', yn(a.longShots)); set('RematesPrimeira', yn(a.firstTime));
-    set('Tackling', 'Normal');
+    // manual: Easy = fewer bookings/red cards for us (and fewer injuries for them), no rating cost; Normal = off
+    set('Tackling', plan.best.xi.filter(x => /aggressive/i.test(x.p.talent || '')).length >= 2 ? 'Normal' : 'Easy');
     set('Preferred_Side', plan.pref);
     set('Team_attitude', plan.mots?.use ? 'Match of the Season' : 'Normal');
     if (plan.captain) set('Team_Captain', plan.captain.p.name);
@@ -3168,6 +3212,37 @@
     return todo.length;
   }
   // GM storage stays small: keep our own and the next opponent's reports, then the newest others.
+  /* Weekly: the latest league reports of the top three in a set of top divisions — the strongest teams in the game,
+   * and twice the data for the model, tactic values and shape effects (2026-11-18: 24 leaders, 144 matches —
+   * 5-2-3 in ~100, defence ~11 stars, tactics in two families, Easy tackling). Stored like division reports. */
+  const ELITE_LEAGUES = ['ZA', 'PL', 'GR', 'PT', 'ES', 'IT', 'BR', 'HU'];
+  async function crawlElite(progress = () => {}) {
+    const ids = [];
+    for (const sg of ELITE_LEAGUES) {
+      progress(`Top leagues: ${sg}…`);
+      try {
+        const { doc } = await fetchDoc(`/classificacao.asp?dv=1&sr=1&vf=1&sg=${sg}`);
+        for (const r of $$('tr.inf-st__row', doc).slice(0, 3)) {
+          const a = r.querySelector('a[href*="ver_equipa.asp?equipa="]');
+          if (!a) continue;
+          await sleep(120);
+          const { doc: cal } = await fetchDoc(`/calendario.asp?action=equipa&equipa=${param(a.getAttribute('href'), 'equipa')}`);
+          ids.push(...parseFixtureRows(cal).filter(f => f.reportId && /Lg/.test(f.type)).slice(-4).map(f => f.reportId));
+        }
+      } catch { /* next league */ }
+      await sleep(150);
+    }
+    let n = 0;
+    for (const id of [...new Set(ids)].filter(id => !db.reports[id])) {
+      progress(`Top leagues: report ${++n}…`);
+      try { await grab('/relatorio.asp?jogo_id=' + id); if (db.reports[id]) db.reports[id].elite = true; } catch { /* skip */ }
+      await sleep(120);
+    }
+    db.eliteAt = now();
+    pruneReports();
+    save();
+    return n;
+  }
   function pruneReports() {
     const all = Object.values(db.reports);
     if (all.length <= MAX_REPORTS) return;
@@ -3330,10 +3405,12 @@
   }
   async function learn(progress = () => {}) {
     if (!db.divisionCrawledAt || now() - db.divisionCrawledAt > 20 * 3600e3) await crawlDivision(progress);
+    if (!db.eliteAt || now() - db.eliteAt > 7 * 86400e3) { await crawlElite(progress); db.model = { ...db.model, fittedAt: 0 }; } // refit on the new data
     recordGrowth();
     gradeMatches();
     learnBlend();
     learnATs();
+    learnATValue();
     progress('Calibrating…');
     if (!db.model?.fittedAt || now() - db.model.fittedAt > 20 * 3600e3 || (db.model.fittedOn || 0) + 20 <= Object.keys(db.reports).length) { learnRating(); learnLanes(); calibrateModel(); learnShapes(); }
     else if (!db.model?.shapeFx) learnShapes();
@@ -3989,5 +4066,5 @@ input.txt{flex:1;height:26px;border:1px solid var(--line);background:var(--bg);c
   setInterval(() => { if (!document.hidden || now() - (db.lastPilotAt || 0) > 3600e3) { db.lastPilotAt = now(); autoPilot().catch(e => console.warn('[PM Copilot] autopilot', e)); } }, 30 * 60e3);
   if (GM_getValue('pmc_open', false)) setOpen(true);
   if (window.__PMC_TEST) window.__PMC_TEST.version = VERSION;
-  if (window.__PMC_TEST) window.__PMC_TEST.api = { db: () => db, ingest, fetchDoc, grab, parseSkillPlayers, computePlan, trainingAdvice, clubAdvice, staffAdvice, scoutOpponent, refreshAll, calibration, snapshot, render, setOpen, planEvents, lectureChoice, autoPilot, applyOrders, autoEvents, autoLecture, autoRenew, autoTraining, trainingDue, depthGains, qualityOf, qualityBy, xiGains, projectSkills, healthCheck, learnBlend, shown, applyUpcoming, verifyBoard, fetchValues, learnATs, motsSeason, seasonTable, parseStandingsPage, squadPool, withTalents, slotImpact, talentBonus, staffTrainingTarget, prep, rankCandidates, badgeMarketRows, valuePath, learn, calibrateModel, gradeMatches, learnSummary, recordGrowth, recordDecision, scanMarket, runScan, recruitBoard, fairPriceModel, searchUrl, specialityPlan, youthMoves, autoYouth, autoSpeciality, goalRate, motsPlan, learnShapes, learnRating, learnLanes, attackLanes, slotScore, zonesFor, toStars, calibration, ROLE_W };
+  if (window.__PMC_TEST) window.__PMC_TEST.api = { db: () => db, ingest, fetchDoc, grab, parseSkillPlayers, computePlan, trainingAdvice, clubAdvice, staffAdvice, scoutOpponent, refreshAll, calibration, snapshot, render, setOpen, planEvents, lectureChoice, autoPilot, applyOrders, autoEvents, autoLecture, autoRenew, autoTraining, trainingDue, crawlElite, learnATValue, atFx, atWorkRate, depthGains, qualityOf, qualityBy, xiGains, projectSkills, healthCheck, learnBlend, shown, applyUpcoming, verifyBoard, fetchValues, learnATs, motsSeason, seasonTable, parseStandingsPage, squadPool, withTalents, slotImpact, talentBonus, staffTrainingTarget, prep, rankCandidates, badgeMarketRows, valuePath, learn, calibrateModel, gradeMatches, learnSummary, recordGrowth, recordDecision, scanMarket, runScan, recruitBoard, fairPriceModel, searchUrl, specialityPlan, youthMoves, autoYouth, autoSpeciality, goalRate, motsPlan, learnShapes, learnRating, learnLanes, attackLanes, slotScore, zonesFor, toStars, calibration, ROLE_W };
 })();
