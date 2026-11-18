@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PM Copilot — Planetarium Manager assistant
 // @namespace    pm-copilot
-// @version      0.21.0
+// @version      0.22.0
 // @description  Opponent-aware tactics, match prep autopilot, training, transfers, finance and facilities for pmanager.org — learns from every match. Changelog: github.com/Jadax/pm-advisor
 // @author       Tushant Sharma
 // @license      MIT
@@ -23,7 +23,7 @@
 (() => {
   'use strict';
   if (window.top !== window.self) return;
-  const VERSION = '0.21.0';
+  const VERSION = '0.22.0';
   const PAGE = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
 
   /* =========================================================================
@@ -2367,6 +2367,19 @@
     });
   }
   // Every listing evaluated at every XI slot of its own line, then the shortlists and a per-slot board.
+  // The game's Quality from skills: 6.2 + 1.41·Σprimaries + 0.52·Σsecondaries + 0.19·Σphysicals (matches our 17
+  // players within ~1). Grades are 10-point bands starting at x1 (Good 60, Very Good 61–70, Excellent 71–80…).
+  function qualityOf(sk, line) {
+    const ks = Object.keys(ROLE_W[line] || ROLE_W.M), phys = ['SPE', 'STR'], prim = ks.slice(0, 2), sec = ks.filter(k => !prim.includes(k) && !phys.includes(k));
+    const S = arr => sum(arr.map(k => sk?.[k] || 0));
+    return 6.2 + 1.41 * S(prim) + 0.52 * S(sec) + 0.19 * S(ks.filter(k => phys.includes(k)));
+  }
+  const qGrade = q => DENOMS[clamp(Math.ceil(q / 10) - 1, 0, 9)];
+  // Peak Quality he reaches by the target age (the best season up to it; he may already be past it)
+  const qualityBy = (p, line, age = PLAN_AGE) => { const n = Math.max(0, age - (p.age || 22)); return Math.max(...projectSkills(p, line, n).slice(0, n + 1).map(x => qualityOf(x.sk, line))); };
+  const PLAN_AGE = 28;
+  const PLAN_BUDGETS = { cap: 'my cap', double: '2× cap', funds: '80% of funds' };
+  const planBudget = caps => ({ cap: caps.max, double: caps.max * 2, funds: caps.funds * 0.8 })[db.prefs.planBudget || 'cap'];
   const MIN_UPGRADE_NOW = 0.5; // weighted rating points the XI gains today
   const MIN_RATING_GAIN = 1.5; // plain rating over the replaced player, for the buy lists
   const PROSPECT_AGE = 21, PROSPECT_POT = 'Good';
@@ -2456,13 +2469,27 @@
       const one = (key, ok = () => true) => forSlot.filter(ok).sort((a, b) => key(b) - key(a))[0] || null;
       return { slot: o.x.slot, starter: o.x.p, ov: o.v, imp: impact.get(o.x.slot) || 1, best: one(e => e.w, e => e.c.age <= maxAge), value: one(e => e.roi) };
     }).sort((a, b) => b.imp - a.imp);
-    const prospects = [...bestPer.values()].filter(e => e.gains && isProspect(e.c) && e.wageOk && e.expPrice <= caps.funds * 0.8)
+    const budget = planBudget(caps);
+    const prospects = [...bestPer.values()].filter(e => e.gains && isProspect(e.c) && e.wageOk && e.expPrice <= budget)
       .map(e => { const later = e.gains.slice(2), plainLater = (e.plainGains || e.gains).slice(2); return Object.assign(e, { future: avg(later), peak: Math.max(...later), plainPeak: Math.max(...plainLater), at3: e.gains[3] }); })
       // the same bar as the buy lists: a real rating gain over the man he'd replace (at his peak here)
       .filter(e => e.plainPeak >= MIN_RATING_GAIN).sort((a, b) => b.future - a.future)
       // the best of each line first (forwards weigh most in the model and would take every place), then by rank
       .reduce((acc, e, _, all) => { if (!acc.length) { const firsts = ['GK', 'D', 'M', 'F'].map(l => all.find(x => (x.slot?.line || x.c.line) === l)).filter(Boolean); acc.push(...firsts.sort((a, b) => b.future - a.future)); } if (acc.length < 6 && !acc.includes(e)) acc.push(e); return acc; }, []).slice(0, 6);
-    return { caps, fair, best, value, stretch, bids, prospects, slots, maxAge, all: uniq, minNational: db.academy?.minNational, n: cands.length, scannedAt: db.scan?.at };
+    const targetQ = db.prefs.targetQ || 81; // Formidable
+    const qCache = new Map(), qOf = (p, line) => { const k = p.id + line; if (!qCache.has(k)) qCache.set(k, qualityBy(p, line)); return qCache.get(k); };
+    const market = [...bestPer.values()].filter(e => e.wageOk && e.c.age <= Math.max(maxAge, PLAN_AGE) && e.expPrice <= budget);
+    const squadPlan = plan.best.xi.map(x => {
+      const pl = plan.pool.find(q => q.id === x.p.id) || x.p, line = x.slot.line;
+      const qNow = pl.q || qualityOf(pl.sk, line), q28 = qOf(pl, line);
+      const fits = e => e.c.line === line && posFactor(e.c, x.slot) >= 0.99;
+      const all = market.filter(fits).map(e => ({ e, q28: qOf(e.c, line), qNow: qualityOf(e.c.sk, line) }));
+      let routes = all.filter(r => r.q28 >= Math.max(targetQ, q28 + 3)).sort((a, b) => a.e.expPrice - b.e.expPrice).slice(0, 2);
+      // nobody reaches the target within budget: the biggest step up we can afford (≥ +3 Quality by 28)
+      if (!routes.length) routes = all.filter(r => r.q28 >= q28 + 3).sort((a, b) => b.q28 - a.q28 || a.e.expPrice - b.e.expPrice).slice(0, 1).map(r => ({ ...r, closest: true }));
+      return { slot: x.slot, p: pl, qNow, q28, ok: q28 >= targetQ, routes };
+    });
+    return { caps, fair, best, value, stretch, bids, prospects, squadPlan, targetQ, budget, slots, maxAge, all: uniq, minNational: db.academy?.minNational, n: cands.length, scannedAt: db.scan?.at };
   }
 
   /* Player page: the game's Value, and whether he can still be bought — "Currently in transfer list" for an
@@ -3770,7 +3797,12 @@ input.txt{flex:1;height:26px;border:1px solid var(--line);background:var(--bg);c
       if (B.minNational && !/no limit/i.test(B.minNational)) h += `<div class="sec"><div class="sm" style="color:var(--warn)">Your federation now requires national players: ${esc(B.minNational)}. Check nationalities before buying.</div></div>`;
       h += sec('rvalue', 'Best value', tbl(B.value) + '<div class="xs mut" style="margin-top:6px">Most upgrade per $1M of <b>net</b> cost — the fee minus what he still sells for in 3 seasons (young players keep their value, 30+ lose it), plus a season of wages. Free agents and short-term fixes (30–31) included; nobody likely to retire before next season — this season only counts for the rounds left.</div>', { right: 'return per $' });
       if (B.bids?.length) h += sec('rbids', 'Bid up to your cap', tbl(B.bids) + `<div class="xs mut" style="margin-top:6px">Their ask fits your cap but auctions usually end higher (≈ half the Value). Bid at most ${money(B.caps.max)}: ${B.bids.map(e => `${esc(surname(e.c.name))} ~${Math.round(e.chance * 100)}%`).join(' · ')} chance to win at that price.</div>`, { right: 'chance at cap' });
-      if (B.prospects?.length) h += sec('rprosp', 'Prospects', `<table><tr><th>Player</th><th>As</th><th class="n" title="How much better the best XI gets with him in 2–5 seasons, on everyone's projections (our players grow too)">XI in 2–5 yrs</th><th class="n">Expect</th></tr>${B.prospects.map(e => `<tr><td><a href="/ver_jogador.asp?jog_id=${esc(e.c.id)}" style="color:inherit;font-weight:600">${esc(e.c.name)}</a><div class="xs mut">${e.c.age} · ${esc(e.c.line)}${esc(e.c.sides || '')} · pot ${esc(e.c.potential || '?')}${e.c.potNext ? ' → ' + esc(e.c.potNext) : ''}${e.c.talent ? ' · ' + esc(e.c.talent) : ''}</div><div class="xs mut">rating now ${f1(roleSkill(e.c, e.c.line))} → @24 ${f1(roleSkill({ sk: projectSkills(e.c, e.c.line, Math.max(0, 24 - e.c.age))[Math.max(0, 24 - e.c.age)].sk }, e.c.line))}</div></td><td>${chip((e.slot || e.vs?.slot || { code: e.c.line }).code || e.c.line)}</td><td class="n"><b style="color:var(--good)">${sg(e.future)}</b><div class="xs mut">today ${sg(e.gains[0])} · peak rating ${sg(e.plainPeak)}</div></td><td class="n">≈${money(e.expPrice)}<div class="xs mut">${e.c.free ? 'signing fee' : `ask ${money(e.c.price || 0)}${e.value ? ` · value ${money(e.value)}` : ''}`}</div></td></tr>`).join('')}</table><div class="xs mut" style="margin-top:6px">Aged ${PROSPECT_AGE} or under with ${PROSPECT_POT}+ potential: growth from potential (and the game's next-season potential once read), −25%/yr from 21, primaries trained first. They may not start today — this is what they add as they develop. Young players also keep their resale value.</div>`, { right: 'develop', open: false });
+      const budgetSeg = `<span class="seg">${Object.entries(PLAN_BUDGETS).map(([k, l]) => `<button data-planb="${k}" class="${(db.prefs.planBudget || 'cap') === k ? 'on' : ''}">${l}</button>`).join('')}</span>`;
+      if (B.squadPlan?.length) {
+        const short = B.squadPlan.filter(r => !r.ok).length;
+        h += sec('rplan', `Squad plan · ${qGrade(B.targetQ)} by ${PLAN_AGE}`, `<div class="row sp" style="margin-bottom:6px"><span class="xs mut">Budget per player up to ${money(B.budget)}</span>${budgetSeg}</div><table><tr><th>Slot</th><th>Starter</th><th class="n">Quality now → @${PLAN_AGE}</th><th>Cheapest route to ${B.targetQ}+</th></tr>${B.squadPlan.map(r => `<tr><td>${chip(r.slot.code)}</td><td class="xs">${esc(surname(r.p.name))}<div class="mut">${r.p.age}y</div></td><td class="n">${Math.round(r.qNow)} → <b style="color:${r.ok ? 'var(--good)' : 'var(--warn)'}">${Math.round(r.q28)}</b><div class="xs mut">${esc(qGrade(r.q28))}</div></td><td class="xs">${r.ok ? '<span style="color:var(--good)">on track</span>' : r.routes.length ? r.routes.map(x => `<div><a href="/ver_jogador.asp?jog_id=${esc(x.e.c.id)}" style="color:inherit;font-weight:600">${esc(surname(x.e.c.name))}</a> ${x.e.c.age}y · ${Math.round(x.qNow)} → ${Math.round(x.q28)} · ≈${money(x.e.expPrice)}${x.closest ? ' <span class="mut">(best step up)</span>' : ''}</div>`).join('') : '<span class="mut">nobody on the market within this budget</span>'}</td></tr>`).join('')}</table><div class="xs mut" style="margin-top:6px">Quality is the game's own number (Formidable = 81+), projected from potential, the game's next-season potential, −25%/yr from 21 and primaries-first training; @${PLAN_AGE} = his best season up to that age. ${short} of 11 starters fall short. Routes: natural for the slot, reaching ${B.targetQ}+ by ${PLAN_AGE}, cheapest first (expected winning bid); where nobody does within budget, the biggest affordable step up (+3 or more by ${PLAN_AGE}). Once primaries reach 20, Quality grows only through secondaries — training moves there automatically.</div>`, { right: `${11 - short}/11 on track` });
+      }
+      if (B.prospects) h += sec('rprosp', 'Prospects', `<div class="row sp" style="margin-bottom:6px"><span class="xs mut">Up to ${money(B.budget)} each</span>${budgetSeg}</div>` + (B.prospects.length ? `<table><tr><th>Player</th><th>As</th><th class="n" title="How much better the best XI gets with him in 2–5 seasons, on everyone's projections (our players grow too)">XI in 2–5 yrs</th><th class="n">Expect</th></tr>${B.prospects.map(e => `<tr><td><a href="/ver_jogador.asp?jog_id=${esc(e.c.id)}" style="color:inherit;font-weight:600">${esc(e.c.name)}</a><div class="xs mut">${e.c.age} · ${esc(e.c.line)}${esc(e.c.sides || '')} · pot ${esc(e.c.potential || '?')}${e.c.potNext ? ' → ' + esc(e.c.potNext) : ''}${e.c.talent ? ' · ' + esc(e.c.talent) : ''}</div><div class="xs mut">rating now ${f1(roleSkill(e.c, e.c.line))} → @24 ${f1(roleSkill({ sk: projectSkills(e.c, e.c.line, Math.max(0, 24 - e.c.age))[Math.max(0, 24 - e.c.age)].sk }, e.c.line))}</div></td><td>${chip((e.slot || e.vs?.slot || { code: e.c.line }).code || e.c.line)}</td><td class="n"><b style="color:var(--good)">${sg(e.future)}</b><div class="xs mut">today ${sg(e.gains[0])} · peak rating ${sg(e.plainPeak)}</div></td><td class="n">≈${money(e.expPrice)}<div class="xs mut">${e.c.free ? 'signing fee' : `ask ${money(e.c.price || 0)}${e.value ? ` · value ${money(e.value)}` : ''}`}</div></td></tr>`).join('')}</table><div class="xs mut" style="margin-top:6px">Aged ${PROSPECT_AGE} or under with ${PROSPECT_POT}+ potential: growth from potential (and the game's next-season potential once read), −25%/yr from 21, primaries trained first. They may not start today — this is what they add as they develop. Young players also keep their resale value.</div>` : '<div class="sm mut">No prospect within this budget clearly improves the XI later — widen the budget.</div>'), { right: 'develop', open: false });
       if (B.stretch.length) h += sec('rstretch', 'Worth saving for', tbl(B.stretch) + '<div class="xs mut" style="margin-top:6px">Bigger long-term upgrades above your cap (under 30).</div>', { right: `> ${money(B.caps.max)}`, open: false });
       h += sec('rslots', 'By position', `<table><tr><th>Slot</th><th>Starter</th><th>Best</th><th>Value</th></tr>${B.slots.map(s => `<tr><td>${chip(s.slot.code)}<div class="xs mut" title="How much this slot decides matches (1 = average)">×${s.imp.toFixed(1)}</div></td><td class="xs">${esc(surname(s.starter.name))}<div class="mut">${f1(s.ov.now)} → ${f1(s.ov.at26)}</div></td>${[s.best, s.value].map(e => `<td class="xs">${e ? `<a href="/ver_jogador.asp?jog_id=${esc(e.c.id)}" style="color:inherit;font-weight:600">${esc(surname(e.c.name))}</a> <span style="color:var(--good)">${sg(e.dNow)}</span><div class="mut">${f1(e.v.now)} vs ${f1(e.ov.now)} · ${e.c.age}y · ≈${money(e.expPrice)}</div>` : '<span class="mut">—</span>'}</td>`).join('')}</tr>`).join('')}</table><div class="xs mut" style="margin-top:6px">Ordered by how much each position decides matches in the current model (×1 = average).</div>`, { open: false });
     }
@@ -3861,6 +3893,7 @@ input.txt{flex:1;height:26px;border:1px solid var(--line);background:var(--bg);c
     if (t.dataset.motsused) { motsSeason(); const played = new Set((db.fixtures?.list || []).filter(f => f.score).map(fixtureKey)); db.mots.base = Math.max(0, +t.dataset.motsused - db.mots.used.filter(k => played.has(k)).length); planCache = { v: -1, plan: null }; save(); return render(); }
     if (t.dataset.buypct) { db.prefs.buyPct = +t.dataset.buypct; save(); return render(); }
     if (t.dataset.maxage) { db.prefs.maxBuyAge = +t.dataset.maxage; save(); return render(); }
+    if (t.dataset.planb) { db.prefs.planBudget = t.dataset.planb; save(); return render(); }
     if (t.dataset.ex) {
       const out = (db.prefs.out = db.prefs.out || {});
       if (outNow().has(t.dataset.ex)) delete out[t.dataset.ex]; else out[t.dataset.ex] = outUntil();
@@ -3928,5 +3961,5 @@ input.txt{flex:1;height:26px;border:1px solid var(--line);background:var(--bg);c
   setInterval(() => { if (!document.hidden || now() - (db.lastPilotAt || 0) > 3600e3) { db.lastPilotAt = now(); autoPilot().catch(e => console.warn('[PM Copilot] autopilot', e)); } }, 30 * 60e3);
   if (GM_getValue('pmc_open', false)) setOpen(true);
   if (window.__PMC_TEST) window.__PMC_TEST.version = VERSION;
-  if (window.__PMC_TEST) window.__PMC_TEST.api = { db: () => db, ingest, fetchDoc, grab, parseSkillPlayers, computePlan, trainingAdvice, clubAdvice, staffAdvice, scoutOpponent, refreshAll, calibration, snapshot, render, setOpen, planEvents, lectureChoice, autoPilot, applyOrders, autoEvents, autoLecture, autoRenew, autoTraining, trainingDue, xiGains, projectSkills, healthCheck, learnBlend, shown, applyUpcoming, verifyBoard, fetchValues, learnATs, motsSeason, seasonTable, parseStandingsPage, squadPool, withTalents, slotImpact, talentBonus, staffTrainingTarget, prep, rankCandidates, badgeMarketRows, valuePath, learn, calibrateModel, gradeMatches, learnSummary, recordGrowth, recordDecision, scanMarket, runScan, recruitBoard, fairPriceModel, searchUrl, specialityPlan, youthMoves, autoYouth, autoSpeciality, goalRate, motsPlan, learnShapes, learnRating, learnLanes, attackLanes, slotScore, zonesFor, toStars, calibration, ROLE_W };
+  if (window.__PMC_TEST) window.__PMC_TEST.api = { db: () => db, ingest, fetchDoc, grab, parseSkillPlayers, computePlan, trainingAdvice, clubAdvice, staffAdvice, scoutOpponent, refreshAll, calibration, snapshot, render, setOpen, planEvents, lectureChoice, autoPilot, applyOrders, autoEvents, autoLecture, autoRenew, autoTraining, trainingDue, qualityOf, qualityBy, xiGains, projectSkills, healthCheck, learnBlend, shown, applyUpcoming, verifyBoard, fetchValues, learnATs, motsSeason, seasonTable, parseStandingsPage, squadPool, withTalents, slotImpact, talentBonus, staffTrainingTarget, prep, rankCandidates, badgeMarketRows, valuePath, learn, calibrateModel, gradeMatches, learnSummary, recordGrowth, recordDecision, scanMarket, runScan, recruitBoard, fairPriceModel, searchUrl, specialityPlan, youthMoves, autoYouth, autoSpeciality, goalRate, motsPlan, learnShapes, learnRating, learnLanes, attackLanes, slotScore, zonesFor, toStars, calibration, ROLE_W };
 })();
