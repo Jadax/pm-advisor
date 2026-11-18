@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PM Copilot — Planetarium Manager assistant
 // @namespace    pm-copilot
-// @version      0.24.0
+// @version      0.25.0
 // @description  Opponent-aware tactics, match prep autopilot, training, transfers, finance and facilities for pmanager.org — learns from every match. Changelog: github.com/Jadax/pm-advisor
 // @author       Tushant Sharma
 // @license      MIT
@@ -23,7 +23,7 @@
 (() => {
   'use strict';
   if (window.top !== window.self) return;
-  const VERSION = '0.24.0';
+  const VERSION = '0.25.0';
   const PAGE = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
 
   /* =========================================================================
@@ -111,6 +111,8 @@
   try { db = Object.assign(blankDb(), JSON.parse(GM_getValue(KEY, '{}'))); } catch { db = blankDb(); }
   db.prefs = Object.assign(blankDb().prefs, db.prefs);
   if (!db.prefs.autoSaveDefaulted) { db.prefs.autoSave = true; db.prefs.autoSaveDefaulted = true; } // auto-save became the default in 0.3.0
+  // 0.25.0: the user's call — 5-2-3, the leaders' shape (≈100 of 144 top-league matches; concedes 11% below its zones over 147)
+  if (!db.prefs.systemDefaulted) { db.prefs.system = db.prefs.system || '5-2-3'; db.prefs.systemDefaulted = true; }
   // 0.17.2: "unavailable" marks were set by tapping a squad row and never expired — Brekhun, Šeremet and Kesici sat
   // out for weeks that way. Old marks are cleared once (and shown); new ones last until the next match.
   if (!db.prefs.outMigrated) { if ((db.prefs.excluded || []).length) db.clearedOut = db.prefs.excluded; db.prefs.excluded = []; db.prefs.out = {}; db.prefs.outMigrated = true; }
@@ -1632,7 +1634,10 @@
       }
     }
     results.sort((a, b) => b.val - a.val);
-    const best = results[0];
+    // the team system is played unless another shape is clearly better against this opponent (> 0.03 points)
+    const sys = db.prefs.system && db.prefs.system !== 'auto' ? db.prefs.system : null;
+    const sysBest = sys && results.find(r => shapeKey(r.f) === sys);
+    const best = sysBest && results[0].val - sysBest.val <= SYSTEM_MARGIN ? sysBest : results[0];
     // Preferred side: compare every option on the chosen setup.
     const base = { z: best.z, style: best.style, passing: best.passing, home, atWon: best.ats?.won || 0, attitude: 'Normal', shape: shapeKey(best.f) };
     const prefs = Object.keys(PREF_W).filter(k => k === 'Normal' || Object.keys(PREF_W[k]).every(l => best.f.M[l] + best.f.F[l] > 0))
@@ -2443,8 +2448,49 @@
   const MIN_UPGRADE_NOW = 0.5; // weighted rating points the XI gains today
   const MIN_RATING_GAIN = 1.5; // plain rating over the replaced player, for the buy lists
   const PROSPECT_AGE = 21, PROSPECT_POT = 'Good';
-  function recruitBoard(plan) {
-    if (!plan?.best) return null;
+  /* Every formation with our squad over the whole league season: expected points per game against each opponent
+   * as their reports show them, best style/passing per formation. The best shape is the team's "system" (or the
+   * one chosen in prefs): recruitment, squad plan and depth are measured on its slots, not on whatever shape the
+   * next match happens to pick. */
+  // play the system unless another shape is clearly better against that opponent (points per game)
+  const SYSTEM_MARGIN = 0.15;
+  function formationTable(plan) {
+    const key = dataVersion + ':ft';
+    if (formationTable.cache?.k === key) return formationTable.cache.v;
+    const me = norm(db.me.name || ''), pool = plan.pool;
+    const games = (db.fixtures?.list || []).filter(f => /Lg/i.test(f.type) && [norm(f.home), norm(f.away)].includes(me))
+      .map(f => { const home = norm(f.home) === me; return { home, side: sideFromHistory(home ? f.away : f.home, home, plan.best.z) }; }).filter(g => g.side.known);
+    if (!games.length) games.push({ home: plan.home, side: plan.oppSide });
+    const rows = [];
+    for (const f of FORMATIONS) {
+      const xi = bestXI(pool, f);
+      if (!xi) continue;
+      const z = addStars(toStars(zonesFor(xi), plan.cal), tiShift(xi));
+      let bestRow = null;
+      for (const style of STYLES) for (const passing of PASSINGS) {
+        let pts = 0, gf = 0, ga = 0;
+        for (const g of games) { const r = simulate({ z, style, passing, home: g.home, attitude: 'Normal', atWon: 0, shape: shapeKey(f) }, g.side); pts += (3 * r.w + r.d) / games.length; gf += r.xgFor / games.length; ga += r.xgAg / games.length; }
+        if (!bestRow || pts > bestRow.pts) bestRow = { f, xi, z, style, passing, pts, gf, ga };
+      }
+      rows.push(bestRow);
+    }
+    // best variant per shape (lane layout) — "5-2-3" etc.
+    const byShape = new Map();
+    for (const r of rows.sort((a, b) => b.pts - a.pts)) if (!byShape.has(shapeKey(r.f))) byShape.set(shapeKey(r.f), r);
+    const v = { rows: [...byShape.values()], games: games.length };
+    formationTable.cache = { k: key, v };
+    return v;
+  }
+  // The plan to recruit for: our best XI in the team system (prefs.system, else the season's best shape).
+  function systemPlan(plan) {
+    const T = formationTable(plan), want = db.prefs.system && db.prefs.system !== 'auto' ? db.prefs.system : T.rows[0] && shapeKey(T.rows[0].f);
+    const r = T.rows.find(x => shapeKey(x.f) === want) || T.rows[0];
+    if (!r) return plan;
+    return { ...plan, best: { ...plan.best, f: r.f, xi: r.xi, z: r.z, style: r.style, passing: r.passing }, system: shapeKey(r.f) };
+  }
+  function recruitBoard(plan0) {
+    if (!plan0?.best) return null;
+    const plan = systemPlan(plan0);
     const listings = Object.values(db.scan?.rows || {});
     const mine = new Set((db.squad?.players || []).map(p => p.id));
     const cands = listings.filter(r => !mine.has(r.id) && r.line);
@@ -2559,7 +2605,7 @@
       if (!routes.length) routes = all.filter(r => r.q28 >= q28 + 3).sort((a, b) => b.q28 - a.q28 || a.e.expPrice - b.e.expPrice).slice(0, 1).map(r => ({ ...r, closest: true }));
       return { slot: x.slot, p: pl, qNow, q28, ok: q28 >= targetQ, routes };
     });
-    return { caps, fair, best, value, stretch, bids, prospects, squadPlan, depth, targetQ, budget, slots, maxAge, all: uniq, minNational: db.academy?.minNational, n: cands.length, scannedAt: db.scan?.at };
+    return { system: plan.system, caps, fair, best, value, stretch, bids, prospects, squadPlan, depth, targetQ, budget, slots, maxAge, all: uniq, minNational: db.academy?.minNational, n: cands.length, scannedAt: db.scan?.at };
   }
 
   /* Player page: the game's Value, and whether he can still be bought — "Currently in transfer list" for an
@@ -3901,6 +3947,10 @@ input.txt{flex:1;height:26px;border:1px solid var(--line);background:var(--bg);c
       if (B.minNational && !/no limit/i.test(B.minNational)) h += `<div class="sec"><div class="sm" style="color:var(--warn)">Your federation now requires national players: ${esc(B.minNational)}. Check nationalities before buying.</div></div>`;
       h += sec('rvalue', 'Best value', tbl(B.value) + '<div class="xs mut" style="margin-top:6px">Most upgrade per $1M of <b>net</b> cost — the fee minus what he still sells for in 3 seasons (young players keep their value, 30+ lose it), plus a season of wages. Free agents and short-term fixes (30–31) included; nobody likely to retire before next season — this season only counts for the rounds left.</div>', { right: 'return per $' });
       if (B.bids?.length) h += sec('rbids', 'Bid up to your cap', tbl(B.bids) + `<div class="xs mut" style="margin-top:6px">Their ask fits your cap but auctions usually end higher (≈ half the Value). Bid at most ${money(B.caps.max)}: ${B.bids.map(e => `${esc(surname(e.c.name))} ~${Math.round(e.chance * 100)}%`).join(' · ')} chance to win at that price.</div>`, { right: 'chance at cap' });
+      {
+        const T = formationTable(computePlan()), cur = db.prefs.system || 'auto';
+        h += sec('rsys', `Team system · ${esc(B.system || '')}`, `<div class="xs mut" style="margin-bottom:6px">Expected points per league game with our squad, every formation, against each opponent as their reports show them (${T.games} fixtures). Recruitment, squad plan and depth use the system's positions; matches play it unless another shape is clearly better that day.</div><table><tr><th>Shape</th><th>Style</th><th class="n">Pts/game</th><th class="n">xG</th><th></th></tr>${T.rows.slice(0, 8).map(r => { const k = shapeKey(r.f); return `<tr><td><b>${esc(k)}</b> <span class="xs mut">${esc(formDetail(r.f))}</span></td><td class="xs">${r.style}/${r.passing}</td><td class="n">${r.pts.toFixed(2)}</td><td class="n">${f1(r.gf)}–${f1(r.ga)}</td><td><button class="btn" data-system="${esc(k)}">${cur === k ? 'system ✓' : 'use'}</button></td></tr>`; }).join('')}</table><div class="row sp" style="margin-top:6px"><span class="xs mut">${cur === 'auto' ? 'Auto: the best shape over the season.' : 'Fixed by you.'}</span><button class="btn" data-system="auto">${cur === 'auto' ? 'auto ✓' : 'auto'}</button></div>`, { right: cur === 'auto' ? 'auto' : 'fixed', open: true });
+      }
       if (B.depth) h += sec('rdepth', 'Squad depth', B.depth.length ? `<table><tr><th>Player</th><th class="n" title="Average gain to the best XI when one starter is missing, over every starter">Cover gain</th><th class="n">Expect</th></tr>${B.depth.map(e => `<tr><td><a href="/ver_jogador.asp?jog_id=${esc(e.c.id)}" style="color:inherit;font-weight:600">${esc(e.c.name)}</a><div class="xs mut">${e.c.age} · ${esc(e.c.line)}${esc(e.c.sides || '')} · Q${Math.round(qualityOf(e.c.sk, e.c.line))} · pot ${esc(e.c.potential || '?')}</div></td><td class="n"><b style="color:var(--good)">${sg(e.depth)}</b><div class="xs mut">up to ${sg(e.coverMax)}</div></td><td class="n">≈${money(e.expPrice)}<div class="xs mut">${e.c.free ? 'signing fee' : `ask ${money(e.c.price || 0)}`}${e.c.wage ? ` · ${money(e.c.wage)}/wk` : ''}</div></td></tr>`).join('')}</table><div class="xs mut" style="margin-top:6px">Cover for injuries, suspensions and rest: the best XI re-solved with each starter missing in turn, with and without him; average gain, and the biggest single case. Best gain per $1M of net cost, one per line, within the budget below.</div>` : '<div class="sm mut">Nobody within budget improves the cover.</div>', { right: 'cover', open: true });
       const budgetSeg = `<span class="seg">${Object.entries(PLAN_BUDGETS).map(([k, l]) => `<button data-planb="${k}" class="${(db.prefs.planBudget || 'cap') === k ? 'on' : ''}">${l}</button>`).join('')}</span>`;
       if (B.squadPlan?.length) {
@@ -3999,6 +4049,7 @@ input.txt{flex:1;height:26px;border:1px solid var(--line);background:var(--bg);c
     if (t.dataset.buypct) { db.prefs.buyPct = +t.dataset.buypct; save(); return render(); }
     if (t.dataset.maxage) { db.prefs.maxBuyAge = +t.dataset.maxage; save(); return render(); }
     if (t.dataset.planb) { db.prefs.planBudget = t.dataset.planb; save(); return render(); }
+    if (t.dataset.system) { db.prefs.system = t.dataset.system; planCache = { v: -1, plan: null }; save(); return render(); }
     if (t.dataset.ex) {
       const out = (db.prefs.out = db.prefs.out || {});
       if (outNow().has(t.dataset.ex)) delete out[t.dataset.ex]; else out[t.dataset.ex] = outUntil();
@@ -4066,5 +4117,5 @@ input.txt{flex:1;height:26px;border:1px solid var(--line);background:var(--bg);c
   setInterval(() => { if (!document.hidden || now() - (db.lastPilotAt || 0) > 3600e3) { db.lastPilotAt = now(); autoPilot().catch(e => console.warn('[PM Copilot] autopilot', e)); } }, 30 * 60e3);
   if (GM_getValue('pmc_open', false)) setOpen(true);
   if (window.__PMC_TEST) window.__PMC_TEST.version = VERSION;
-  if (window.__PMC_TEST) window.__PMC_TEST.api = { db: () => db, ingest, fetchDoc, grab, parseSkillPlayers, computePlan, trainingAdvice, clubAdvice, staffAdvice, scoutOpponent, refreshAll, calibration, snapshot, render, setOpen, planEvents, lectureChoice, autoPilot, applyOrders, autoEvents, autoLecture, autoRenew, autoTraining, trainingDue, crawlElite, learnATValue, atFx, atWorkRate, depthGains, qualityOf, qualityBy, xiGains, projectSkills, healthCheck, learnBlend, shown, applyUpcoming, verifyBoard, fetchValues, learnATs, motsSeason, seasonTable, parseStandingsPage, squadPool, withTalents, slotImpact, talentBonus, staffTrainingTarget, prep, rankCandidates, badgeMarketRows, valuePath, learn, calibrateModel, gradeMatches, learnSummary, recordGrowth, recordDecision, scanMarket, runScan, recruitBoard, fairPriceModel, searchUrl, specialityPlan, youthMoves, autoYouth, autoSpeciality, goalRate, motsPlan, learnShapes, learnRating, learnLanes, attackLanes, slotScore, zonesFor, toStars, calibration, ROLE_W };
+  if (window.__PMC_TEST) window.__PMC_TEST.api = { db: () => db, ingest, fetchDoc, grab, parseSkillPlayers, computePlan, trainingAdvice, clubAdvice, staffAdvice, scoutOpponent, refreshAll, calibration, snapshot, render, setOpen, planEvents, lectureChoice, autoPilot, applyOrders, autoEvents, autoLecture, autoRenew, autoTraining, trainingDue, formationTable, systemPlan, crawlElite, learnATValue, atFx, atWorkRate, depthGains, qualityOf, qualityBy, xiGains, projectSkills, healthCheck, learnBlend, shown, applyUpcoming, verifyBoard, fetchValues, learnATs, motsSeason, seasonTable, parseStandingsPage, squadPool, withTalents, slotImpact, talentBonus, staffTrainingTarget, prep, rankCandidates, badgeMarketRows, valuePath, learn, calibrateModel, gradeMatches, learnSummary, recordGrowth, recordDecision, scanMarket, runScan, recruitBoard, fairPriceModel, searchUrl, specialityPlan, youthMoves, autoYouth, autoSpeciality, goalRate, motsPlan, learnShapes, learnRating, learnLanes, attackLanes, slotScore, zonesFor, toStars, calibration, ROLE_W };
 })();
