@@ -2,6 +2,11 @@
 
 Newest first. Written by the daily review (and by hand) whenever the data changes the engine.
 
+## 2026-11-18 — no change (v0.20.2 stays)
+- **Data:** no fresh harvest (browser pane closed); local data unchanged since 01/11 — 99 reports, 2 decisions, 1 graded match (model Brier 0.001 vs pundits 0.639). Refit identical (weighted BASE 5.95, K_BEAT 1.03, K_GK 1.32, K_MID 7.39; −253.4 vs −455.2 constant-rate); only the timestamp moved, not committed.
+- **Not changed:** no new evidence to judge v0.20.x's per-line transfer screening; weather still <30 games per condition, advanced tactics still confounded by team strength.
+- **Watch:** 17 days without a harvest — open the browser pane signed in to pmanager.org before the next run so matches since 01/11 (incl. 18/11 @ Mount Ayliff, 21/11 vs Qwa-Qwa) can be graded offline.
+
 ## 2026-11-17 — no change (v0.19.0 stays)
 - **Data:** no fresh harvest (browser pane closed); local data unchanged since 01/11 — 99 reports, 2 decisions, 1 graded match (model Brier 0.001 vs pundits 0.639). Refit identical; only the timestamp moved, not committed.
 - **Not changed:** no new evidence; weather still <30 games per condition, advanced tactics still confounded by team strength.
