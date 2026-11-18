@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PM Copilot — Planetarium Manager assistant
 // @namespace    pm-copilot
-// @version      0.20.2
+// @version      0.21.0
 // @description  Opponent-aware tactics, match prep autopilot, training, transfers, finance and facilities for pmanager.org — learns from every match. Changelog: github.com/Jadax/pm-advisor
 // @author       Tushant Sharma
 // @license      MIT
@@ -23,7 +23,7 @@
 (() => {
   'use strict';
   if (window.top !== window.self) return;
-  const VERSION = '0.20.2';
+  const VERSION = '0.21.0';
   const PAGE = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
 
   /* =========================================================================
@@ -2211,7 +2211,8 @@
         { line, kind: 'ready', pages: 2, q: { ...base, [p1 + '_op']: '>', [p1]: floor(k1), [p2 + '_op']: '>', [p2]: floor(k2) } },
         // a few points above our weakest starter: real upgrades a smaller budget can win
         { line, kind: 'band', pages: 3, q: { ...base, [p1 + '_op']: '<=', [p1]: String(clamp(Math.floor(low(k1)) + 4, 10, 19)), [p2 + '_op']: '>', [p2]: floor(k2) } },
-        { line, kind: 'prospect', pages: 3, q: { pos, pre_op: '<=', pre, idd_op: '<', idd: '22', prog_op: '>', prog: '6' } },
+        // prog = potential (1 Terrible … 10 World Class): > 5 = Good or better, the Prospects list's bar
+        { line, kind: 'prospect', pages: 3, q: { pos, pre_op: '<=', pre: String(PRICE_STEPS.find(p => p >= buyCaps().funds * 0.8) ?? 'Any'), idd_op: '<', idd: '22', prog_op: '>', prog: '5' } },
       ];
     });
   }
@@ -2367,6 +2368,8 @@
   }
   // Every listing evaluated at every XI slot of its own line, then the shortlists and a per-slot board.
   const MIN_UPGRADE_NOW = 0.5; // weighted rating points the XI gains today
+  const MIN_RATING_GAIN = 1.5; // plain rating over the replaced player, for the buy lists
+  const PROSPECT_AGE = 21, PROSPECT_POT = 'Good';
   function recruitBoard(plan) {
     if (!plan?.best) return null;
     const listings = Object.values(db.scan?.rows || {});
@@ -2402,13 +2405,18 @@
     // quick screen (one slot, one starter), then the real measure on the most promising: the re-solved XI
     // screened per line: a single top-200 on the (forward-heavy) quick score left defenders, midfielders and
     // keepers out of the real evaluation altogether
-    const short = ['GK', 'D', 'M', 'F'].flatMap(l => [...bestPer.values()].filter(e => e.c.line === l && e.wageOk && e.c.age <= MAX_BUY_AGE_ANY && (e.dNow > 0 || e.d5 > 0)).sort((a, b) => b.w - a.w).slice(0, XI_CANDIDATES / 4));
+    const isProspect = c => c.age <= PROSPECT_AGE && denomIdx(c.potential || '') >= denomIdx(PROSPECT_POT);
+    const short = [...new Map(['GK', 'D', 'M', 'F'].flatMap(l => [
+      ...[...bestPer.values()].filter(e => e.c.line === l && e.wageOk && e.c.age <= MAX_BUY_AGE_ANY && (e.dNow > 0 || e.d5 > 0)).sort((a, b) => b.w - a.w).slice(0, XI_CANDIDATES / 4),
+      ...[...bestPer.values()].filter(e => e.c.line === l && e.wageOk && isProspect(e.c)).sort((a, b) => b.d5 - a.d5).slice(0, 25),
+    ]).map(e => [e.c.id, e])).values()];
     const plain = new Map(xiGains(plan, { at: () => 1 }, short.map(e => e.c)).map(x => [x.c.id, x]));
     for (const x of xiGains(plan, impact, short.map(e => e.c))) {
       const e = bestPer.get(x.c.id);
       e.plainNow = plain.get(x.c.id)?.dNow;
-      if (!x.slot) { e.xiOut = true; continue; }
-      Object.assign(e, { slot: x.slot, vs: x.vs, d5: x.d5, dNow: x.dNow, perSeason: x.perSeason, dropped: x.dropped, rNow: x.rNow, rVs: x.rVs, xi: true });
+      e.plainGains = plain.get(x.c.id)?.gains;
+      if (!x.slot) { e.xiOut = true; e.gains = x.gains; e.xiLater = true; continue; }
+      Object.assign(e, { slot: x.slot, vs: x.vs, d5: x.d5, dNow: x.dNow, perSeason: x.perSeason, dropped: x.dropped, rNow: x.rNow, rVs: x.rVs, gains: x.gains, xi: true });
       e.v = { ...e.v, now: x.rNow };
       e.ov = { ...e.ov, now: x.rVs };
       e.w = x.d5;
@@ -2416,7 +2424,10 @@
       e.perM = e.roi;
     }
     // an upgrade must improve the XI today (promotion push: no buying on projected growth alone)
-    const uniq = [...bestPer.values()].filter(e => e.xi && e.d5 > 0.5 && e.dNow >= MIN_UPGRADE_NOW && e.wageOk && e.c.age <= MAX_BUY_AGE_ANY);
+    // a buy must be clearly better today: +1.5 rating over the man he replaces (≈ +6 on the game's Quality), +1.0
+    // for the cheap Best value list — "+0.8 for $590k" is not an upgrade worth an auction
+    const real = (e, min) => (e.plainNow ?? e.dNow) >= min;
+    const uniq = [...bestPer.values()].filter(e => e.xi && e.d5 > 0.5 && e.dNow >= MIN_UPGRADE_NOW && real(e, 1.0) && e.wageOk && e.c.age <= MAX_BUY_AGE_ANY);
     const within = cap => uniq.filter(e => e.expPrice <= cap);
     // the cream only: highest first, one per line (keeper, defence, midfield, attack), nobody twice — so the best
     // defender or midfielder is always shown even when forwards weigh more in the model
@@ -2432,20 +2443,26 @@
     };
     // long-term upgrades only: an old player is a stopgap, and shows up under Best value if he's cheap enough
     const maxAge = db.prefs.maxBuyAge ?? 29;
-    const best = pick(within(caps.max).filter(e => e.c.age <= maxAge), e => e.w, 4);
+    const best = pick(within(caps.max).filter(e => e.c.age <= maxAge && real(e, MIN_RATING_GAIN)), e => e.w, 4);
     // value: most priority-weighted gain per $1M of expected cost (fee + a season of wages); a real upgrade only
     const value = pick(within(caps.max).filter(e => e.d5 > 1), e => e.roi * (e.cheap ? Math.min(1.5, e.cheap) : 1), 4);
     // what more money would buy: biggest upgrades above the cap, under 30, within 80% of funds
-    const stretch = pick(uniq.filter(e => e.expPrice > caps.max && e.expPrice <= caps.funds * 0.8 && e.c.age <= maxAge), e => e.w, 4);
+    const stretch = pick(uniq.filter(e => e.expPrice > caps.max && e.expPrice <= caps.funds * 0.8 && e.c.age <= maxAge && real(e, MIN_RATING_GAIN)), e => e.w, 4);
     // auctions that may still end within the cap: ask fits, expected fee doesn't — bid the cap and see
-    const bids = pick(uniq.filter(e => !e.c.free && (e.c.price || 0) <= caps.max && e.expPrice > caps.max && e.c.age <= maxAge)
+    const bids = pick(uniq.filter(e => !e.c.free && (e.c.price || 0) <= caps.max && e.expPrice > caps.max && e.c.age <= maxAge && real(e, MIN_RATING_GAIN))
       .map(e => Object.assign(e, { chance: winChance(caps.max, e.value || (e.fair && fair?.byValue ? e.fair : 0)) })).filter(e => e.chance >= 0.15), e => e.w * e.chance, 4);
     const slots = ours.map(o => {
       const forSlot = uniq.filter(e => e.slot === o.x.slot && e.expPrice <= caps.max);
       const one = (key, ok = () => true) => forSlot.filter(ok).sort((a, b) => key(b) - key(a))[0] || null;
       return { slot: o.x.slot, starter: o.x.p, ov: o.v, imp: impact.get(o.x.slot) || 1, best: one(e => e.w, e => e.c.age <= maxAge), value: one(e => e.roi) };
     }).sort((a, b) => b.imp - a.imp);
-    return { caps, fair, best, value, stretch, bids, slots, maxAge, all: uniq, minNational: db.academy?.minNational, n: cands.length, scannedAt: db.scan?.at };
+    const prospects = [...bestPer.values()].filter(e => e.gains && isProspect(e.c) && e.wageOk && e.expPrice <= caps.funds * 0.8)
+      .map(e => { const later = e.gains.slice(2), plainLater = (e.plainGains || e.gains).slice(2); return Object.assign(e, { future: avg(later), peak: Math.max(...later), plainPeak: Math.max(...plainLater), at3: e.gains[3] }); })
+      // the same bar as the buy lists: a real rating gain over the man he'd replace (at his peak here)
+      .filter(e => e.plainPeak >= MIN_RATING_GAIN).sort((a, b) => b.future - a.future)
+      // the best of each line first (forwards weigh most in the model and would take every place), then by rank
+      .reduce((acc, e, _, all) => { if (!acc.length) { const firsts = ['GK', 'D', 'M', 'F'].map(l => all.find(x => (x.slot?.line || x.c.line) === l)).filter(Boolean); acc.push(...firsts.sort((a, b) => b.future - a.future)); } if (acc.length < 6 && !acc.includes(e)) acc.push(e); return acc; }, []).slice(0, 6);
+    return { caps, fair, best, value, stretch, bids, prospects, slots, maxAge, all: uniq, minNational: db.academy?.minNational, n: cands.length, scannedAt: db.scan?.at };
   }
 
   /* Player page: the game's Value, and whether he can still be bought — "Currently in transfer list" for an
@@ -2475,7 +2492,7 @@
     return gone;
   }
   // Everyone the Scout tab shows, checked live; repeats while removals pull new players onto the board.
-  const boardEntries = b => [...new Map([...b.best, ...b.value, ...b.stretch, ...b.bids, ...b.slots.flatMap(s => [s.best, s.value])].filter(Boolean).map(e => [e.c.id, e])).values()];
+  const boardEntries = b => [...new Map([...b.best, ...b.value, ...b.stretch, ...b.bids, ...(b.prospects || []), ...b.slots.flatMap(s => [s.best, s.value])].filter(Boolean).map(e => [e.c.id, e])).values()];
   async function verifyBoard(progress = () => {}) {
     let gone = 0;
     for (let pass = 0; pass < 4; pass++) {
@@ -3753,6 +3770,7 @@ input.txt{flex:1;height:26px;border:1px solid var(--line);background:var(--bg);c
       if (B.minNational && !/no limit/i.test(B.minNational)) h += `<div class="sec"><div class="sm" style="color:var(--warn)">Your federation now requires national players: ${esc(B.minNational)}. Check nationalities before buying.</div></div>`;
       h += sec('rvalue', 'Best value', tbl(B.value) + '<div class="xs mut" style="margin-top:6px">Most upgrade per $1M of <b>net</b> cost — the fee minus what he still sells for in 3 seasons (young players keep their value, 30+ lose it), plus a season of wages. Free agents and short-term fixes (30–31) included; nobody likely to retire before next season — this season only counts for the rounds left.</div>', { right: 'return per $' });
       if (B.bids?.length) h += sec('rbids', 'Bid up to your cap', tbl(B.bids) + `<div class="xs mut" style="margin-top:6px">Their ask fits your cap but auctions usually end higher (≈ half the Value). Bid at most ${money(B.caps.max)}: ${B.bids.map(e => `${esc(surname(e.c.name))} ~${Math.round(e.chance * 100)}%`).join(' · ')} chance to win at that price.</div>`, { right: 'chance at cap' });
+      if (B.prospects?.length) h += sec('rprosp', 'Prospects', `<table><tr><th>Player</th><th>As</th><th class="n" title="How much better the best XI gets with him in 2–5 seasons, on everyone's projections (our players grow too)">XI in 2–5 yrs</th><th class="n">Expect</th></tr>${B.prospects.map(e => `<tr><td><a href="/ver_jogador.asp?jog_id=${esc(e.c.id)}" style="color:inherit;font-weight:600">${esc(e.c.name)}</a><div class="xs mut">${e.c.age} · ${esc(e.c.line)}${esc(e.c.sides || '')} · pot ${esc(e.c.potential || '?')}${e.c.potNext ? ' → ' + esc(e.c.potNext) : ''}${e.c.talent ? ' · ' + esc(e.c.talent) : ''}</div><div class="xs mut">rating now ${f1(roleSkill(e.c, e.c.line))} → @24 ${f1(roleSkill({ sk: projectSkills(e.c, e.c.line, Math.max(0, 24 - e.c.age))[Math.max(0, 24 - e.c.age)].sk }, e.c.line))}</div></td><td>${chip((e.slot || e.vs?.slot || { code: e.c.line }).code || e.c.line)}</td><td class="n"><b style="color:var(--good)">${sg(e.future)}</b><div class="xs mut">today ${sg(e.gains[0])} · peak rating ${sg(e.plainPeak)}</div></td><td class="n">≈${money(e.expPrice)}<div class="xs mut">${e.c.free ? 'signing fee' : `ask ${money(e.c.price || 0)}${e.value ? ` · value ${money(e.value)}` : ''}`}</div></td></tr>`).join('')}</table><div class="xs mut" style="margin-top:6px">Aged ${PROSPECT_AGE} or under with ${PROSPECT_POT}+ potential: growth from potential (and the game's next-season potential once read), −25%/yr from 21, primaries trained first. They may not start today — this is what they add as they develop. Young players also keep their resale value.</div>`, { right: 'develop', open: false });
       if (B.stretch.length) h += sec('rstretch', 'Worth saving for', tbl(B.stretch) + '<div class="xs mut" style="margin-top:6px">Bigger long-term upgrades above your cap (under 30).</div>', { right: `> ${money(B.caps.max)}`, open: false });
       h += sec('rslots', 'By position', `<table><tr><th>Slot</th><th>Starter</th><th>Best</th><th>Value</th></tr>${B.slots.map(s => `<tr><td>${chip(s.slot.code)}<div class="xs mut" title="How much this slot decides matches (1 = average)">×${s.imp.toFixed(1)}</div></td><td class="xs">${esc(surname(s.starter.name))}<div class="mut">${f1(s.ov.now)} → ${f1(s.ov.at26)}</div></td>${[s.best, s.value].map(e => `<td class="xs">${e ? `<a href="/ver_jogador.asp?jog_id=${esc(e.c.id)}" style="color:inherit;font-weight:600">${esc(surname(e.c.name))}</a> <span style="color:var(--good)">${sg(e.dNow)}</span><div class="mut">${f1(e.v.now)} vs ${f1(e.ov.now)} · ${e.c.age}y · ≈${money(e.expPrice)}</div>` : '<span class="mut">—</span>'}</td>`).join('')}</tr>`).join('')}</table><div class="xs mut" style="margin-top:6px">Ordered by how much each position decides matches in the current model (×1 = average).</div>`, { open: false });
     }
